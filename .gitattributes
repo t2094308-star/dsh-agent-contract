@@ -1,0 +1,9 @@
+# 行尾统一：仓库内部一律 LF（避免 Windows 侧工具把文件改成 CRLF 后
+# git 报"几百处假差异"——2026-10-03 在 Blockdustry 仓库真机踩过）
+* text=auto eol=lf
+
+# 这些即使写死也要按二进制处理（别做行尾转换）
+*.png binary
+*.jpg binary
+*.zip binary
+*.zstd binary

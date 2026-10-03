@@ -1,0 +1,34 @@
+{
+  "name": "dsh-agent-contract",
+  "version": "0.27.0",
+  "description": "多智能体契约工作流引擎：契约注入 / 每角色委派通道 / 产出契约三工具 / 台账三领域 / 元数据自动派生器 / 图书管理员（按需唤醒）/ 审计（警告制）。",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "node scripts/verify-node.mjs"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./src/client/tab.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "dsh-better-sidebar"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "zod": "^4.6.5"
+  }
+}

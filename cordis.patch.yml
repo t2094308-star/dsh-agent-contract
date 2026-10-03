@@ -1,0 +1,116 @@
+# dsh-agent-contract bundle patch
+# 把「多智能体契约工作流引擎」挂进 profile。
+#
+# **FIX-58 起：零配置自适应** —— 不用再为每个仓库改这个文件。
+# 插件默认**跟随当前工作区/会话**来定项目根（显式配置 > 当前工作区 > 会话 cwd）：
+#   ① 结构按**候选清单**探测既有目录（`任务`/`tasks`、`[Agent进度]`/`progress`、
+#      `docs/{研究,坑,修改,核心数据库}` 及其 `仓库/docs/…` 变体…），**命中即用、不动既有文件**；
+#   ② 一个都没命中 → 在项目根内**新建**默认结构 + `待办.md`（**只新建、绝不覆盖**），
+#      并在回执/面板里说明建了什么（先预览用 `project_init` 的 dryRun）；
+#   ③ 推导结果写在 `<项目根>/.agent-contract/project.json`（派生物·随项目走，删了会自动重探）；
+#   ④ 项目名从工作区目录名推导 ⇒ 记录表**分域**，两个项目来回切也不会串。
+# 想**锁死**某个项目（不让工作区推导覆盖）时，把下面 `project` / `paths` 两段取消注释并填值。
+- insert:
+    - id: agent-contract
+      name: dsh-agent-contract
+      config:
+        # 项目实例（**留空 = 自适应**；填了 = 显式锁定，优先于工作区推导）
+        # project:
+        #   name: ''                 # 留空 = 用工作区目录名
+        #   root: 'D:\我的项目'
+        #   brief: '一句话项目简介（作为契约「任务切面」的一段注入子智能体）'
+        # 目录约定（**不填 = 按候选清单探测 / 探不到就新建默认结构**）
+        # paths:
+        #   tasksDir: '任务'
+        #   progressDir: '[Agent进度]'
+        #   # FIX-69：产出根 —— 档级是**它的子目录**（`docs/产出/L1|L2|L3/`）喵
+        #   deliverablesDir: 'docs/产出'
+        #   docsDirs:
+        #     - 'docs/研究'
+        #     - 'docs/审查'
+        #     - 'docs/整合清单'
+        #     - 'docs/坑'
+        #     - 'docs/修改'
+        #     - 'docs/核心数据库'
+        #     - 'docs/产出'
+        #     - 'docs/archive'
+        #   archiveDir: 'docs/archive'
+        #   # FIX-69：临时文件统一去处（**非类别目录、审计排除**；`.json` 这类只搬不删）喵
+        #   tempDir: 'docs/_临时'
+        #   # 类别 → 目录：审计与馆员据此判「文档是否放错」。
+        #   # ⚠ 要么**八类全给**（研究/审查/整合清单/坑/修改/核心数据库/产出档/归档），
+        #   #   要么一个都不给（走自适应探测）；给一半是不自洽的，套件的形状校验会当场报出来喵
+        #   docKinds:
+        #     研究: 'docs/研究'
+        #     审查: 'docs/审查'
+        #     整合清单: 'docs/整合清单'
+        #     坑: 'docs/坑'
+        #     修改: 'docs/修改'
+        #     核心数据库: 'docs/核心数据库'
+        #     产出档: 'docs/产出'
+        #     归档: 'docs/archive'
+        # panel:
+        #   todoFile: '待办.md'       # 面板「大方向待办」读哪个文件（仍归配置文件）
+        delegation:
+          provider: spawn
+          # maxDepth 留空 = 沿用宿主 profile 的 subagent 配置（当前 3）喵
+        # 角色覆盖示例（同 id 逐字段覆盖内置角色；删掉则全用内置角色卡）
+        roles: []
+        # ⚠ **modelRoutes 与 panel 的五个开关由「设置」页管理（volatile 字段）**：
+        #   volatile 字段**不参与配置文件解析** ⇒ 下面这些键**改了不生效**，仅作示例与说明，
+        #   请到「设置 → 多智能体契约」里改（默认值写在插件 schema 里：adversary = glm-5.3-flash）喵。
+        #   仍归本文件管的键：paths.* / delegation.* / roles / budgets / audit.* / panel.todoFile
+        # 凭证在宿主 provider 账户里，**不要**写进本文件（插件有密钥红线）喵
+        # modelRoutes:            # ← 示例（由设置页管理）
+        #   adversary: glm-5.3-flash
+        #   librarian: { provider: deepseek-official, model: deepseek-flash }
+        budgets:
+          softLimit: 6000
+          hardLimit: 9000
+          warnOverSoftPct: 30
+          mandateSoft: 1500
+          mandateHard: 2400
+          # mandate 片段永不裁剪（传递性要求逐字下发）；超限只警告喵
+          mandateNoClip: true
+        audit:
+          checks:
+            - missing_doc
+            - over_budget
+            - unfilled_slot
+            - stale_progress
+            - cross_vendor
+            - ghost_run
+            - orphan_task
+            - unreleased_run
+            # 文档不在规定类目录 / docs 根残留散 .md（警告制，只报不动）喵
+            - doc_misfiled
+            - doc_meta_missing
+            - doc_tags_stale
+            # 归档只建议，动手的是图书管理员喵
+            - archive_suggest
+            # 并发占用冲突：两个活跃任务的作业登记卡都声明写同一路径（FIX-68；写写冲突按红报）喵
+            - occupancy_conflict
+            # 渐进式披露：概括档缺指向 L1 的下钻指针 / relatedFiles 里有脏路径（FIX-70）喵
+            - missing_progressive_link
+            - dirty_related_path
+            # 格式类（FIX-69）：类型后缀与目录不符 / 类目录里的非 .md / 文件名还带 ^ 前缀喵
+            - doc_kind_mismatch
+            - stray_non_md
+            - legacy_caret
+            # 记录与磁盘不一致（FIX-71，只报不删）：台账有未结任务但文件不在 / 台账有档但文件不在喵
+            - task_file_missing
+            - doc_file_missing
+            # legacy 旧档缺「待归档」标注（FIX-77；馆员批量补，正文零改动）喵
+            - legacy_archive_pending
+            # 簿记类角色干过活却没留痕（FIX-85 ③；它的完成判据是留痕不是文档）喵
+            - bookkeeping_untraced
+            # 绕过契约派出去的子代理：会话树里有、台账里没有（FIX-100；提权后标「已提权」）喵
+            - uncontracted_dispatch
+            # 类别非空但缺索引 / 索引与磁盘不符（FIX-103；索引机器区块由派生器生成）喵
+            - missing_kind_index
+          # archive_suggest 的档龄阈值（天）喵
+          archiveAfterDays: 90
+        # 面板数据源（FIX-29）：待办原文路径（相对项目根；默认 <项目根>/待办.md）喵
+        # FIX-58 起不填也照跑（自适应根 + 默认 `待办.md`）喵
+        # panel:
+        #   todoFile: '待办.md'
