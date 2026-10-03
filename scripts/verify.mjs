@@ -5029,7 +5029,7 @@ ok('FIX-52 设置页：官方 slots/configForms 机制（不自造存储）/ 开
 
 // ---------------------------------------------------------------- 验收⑧：README 已知限制第 1 条改写
 if (process.argv[2]) {
-  const readme52 = await readFile(join(dirname(process.argv[2]), 'README.zh.md'), 'utf8')
+  const readme52 = await readFile(join(dirname(process.argv[2]), 'README.md'), 'utf8')
   // 口径经三轮演进（真机结论 + 裁决 B），现在是：设置页**管**哪些键、配置文件**管**哪些键，两列写清喵
   assert.ok(
     /(开关[\s\S]{0,80}设置)|(设置[\s\S]{0,80}开关)/.test(readme52),
@@ -7003,7 +7003,7 @@ const releaseArg = process.argv[2]
 if (!releaseArg) {
   console.log('skip README 已知限制检查（未传 patch 路径，拿不到 README）')
 } else {
-  const readme = await readFile(join(dirname(releaseArg), 'README.zh.md'), 'utf8')
+  const readme = await readFile(join(dirname(releaseArg), 'README.md'), 'utf8')
   // README 是可被人工重排的（实测被改成 `## 8. 已知限制` 这种带编号的形式）→ 标题匹配要容忍编号喵
   assert.ok(/^## (?:\d+\.\s*)?已知限制\s*$/m.test(readme), 'RELEASE.md：README 必须有「已知限制」段')
   const requiredLimits = [
