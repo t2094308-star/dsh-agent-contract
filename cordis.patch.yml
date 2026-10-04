@@ -108,6 +108,10 @@
             - uncontracted_dispatch
             # 类别非空但缺索引 / 索引与磁盘不符（FIX-103；索引机器区块由派生器生成）喵
             - missing_kind_index
+            # 有头但内容键全空的"全 null 头"（FIX-105；真机积了 126+ 处）喵
+            - null_frontmatter
+            # 正文标题行以 ^ 开头（FIX-110；跑一轮治理去前缀）喵
+            - body_caret_title
           # archive_suggest 的档龄阈值（天）喵
           archiveAfterDays: 90
         # 面板数据源（FIX-29）：待办原文路径（相对项目根；默认 <项目根>/待办.md）喵

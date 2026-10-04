@@ -294,7 +294,7 @@ window.__ModuleLoader__.load({
      * client 是经典脚本、读不到 `package.json`，所以这里**硬编码**；套件里有一条断言
      * 把它与 `package.json` 的 version 逐字比对 —— 发版忘了改会当场红，不会静默漂移喵。
      */
-    const CLIENT_PLUGIN_VERSION = '0.27.0'
+    const CLIENT_PLUGIN_VERSION = '0.35.0'
 
     /** 快照里**必须有**的字段喵（FIX-36）喵：缺任一即判"陈旧"，不得把缺失渲染成 `0`/空列表喵。 */
     const PANEL_REQUIRED_FIELDS = ['audit', 'counts', 'members', 'membersById', 'paths', 'todos']

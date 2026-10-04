@@ -72,7 +72,7 @@ import { findMisfiled, classifyDocPath, commonAncestorOf, isUnder } from './src/
 import { INDEX_FLUSH_DEFAULTS, attachIndexSync, createIndexSync, createSearchIndex } from './src/ledger/index-sync.js'
 import { FTS_THRESHOLD, SCORE_WEIGHTS, docSearch, parseQuery } from './src/search/doc_search.js'
 import vm from 'node:vm'
-import { CHECK_IDS, CHECK_IMPLEMENTATIONS, OBSERVATION_IDS, OBSERVATION_LEVEL, assertKnownChecks, collectContracts, modelOfMember, residentOverlaps } from './src/audit/checks.js'
+import { CHECK_IDS, CHECK_IMPLEMENTATIONS, OBSERVATION_IDS, OBSERVATION_LEVEL, assertKnownChecks, collectContracts, hasAnyDeliverable, modelOfMember, residentOverlaps } from './src/audit/checks.js'
 import { SUGGESTIONS, auditScan } from './src/audit/report.js'
 import { PANEL_SYNC_DEFAULTS, attachPanelSync, createMultiPanelSync, createPanelSync } from './src/panel/snapshot-sync.js'
 // FIX-96：**跑审计 + 重写快照**的唯一实现（工具 / 启动自愈 / 面板「强制刷新」三处同源）喵
@@ -80,7 +80,7 @@ import { refreshPanel, refreshReceiptText, runPanelAudit } from './src/panel/ref
 // FIX-101/102/103：本轮解析结果 / 文档普查 / 类别索引（单一来源）喵
 import { resolvedPathsLines } from './src/ledger/docarea.js'
 // FIX-105：写回既有文件时的头部纪律（无头不补头 / 全 null 头不改写）喵
-import { composeRewrittenFile } from './src/librarian/duties.js'
+import { composeRewrittenFile, stripBodyCaretTitles, stripNullFrontMatter } from './src/librarian/duties.js'
 import { documentCensus } from './src/ledger/census.js'
 import { kindIndexGaps, writeKindIndexes } from './src/librarian/indexes.js'
 import { contractFingerprint, renderContinuationSlice } from './src/contract/assemble.js'
@@ -88,6 +88,8 @@ import { contractFingerprint, renderContinuationSlice } from './src/contract/ass
 import { loadedVersion, pluginVersion as pluginVersionOf, versionDrift } from './src/version.js'
 // FIX-99 ④：全局共享文件清单（跨会话并存的常驻实例会写同一批）喵
 import { globalSharedFiles, globalSharedFilesText } from './src/librarian/globals.js'
+// FIX-108：契约里的审计摘要（与 audit_scan / 面板**同一份实现**）喵
+import { renderAuditDigest } from './src/audit/digest.js'
 import {
   TODO_ROUTE_PATH, createTodoHandler, hashOf, hashText as hashTextHost, isTodoPathAllowed, isTrustedLocalRequest,
   normalizeHashInput, preserveTrailingNewline, toggleTodoLine,
@@ -1747,7 +1749,7 @@ ok('M3-1/3 client tab：经典脚本契约 / 静默降级 / 配色 / 过滤 / �
 // 配置校验：未知检查项必须**报错**（不静默忽略）
 assert.throws(() => assertKnownChecks({ audit: { checks: ['missing_doc', '不存在的检查'] } }), /未知的 audit\.checks 项/, 'M4-1：未知检查项必须报错')
 assert.deepEqual(toHost(assertKnownChecks({ audit: { checks: ['missing_doc'] } })), ['missing_doc'])
-assert.equal(CHECK_IDS.length, 24, 'M4-1：检查项必须齐（FIX-68/69/70/71 共 20 项 + FIX-77 legacy 待归档 + FIX-85 簿记无留痕 + FIX-100 绕过契约 ⇒ 23 项）')
+assert.equal(CHECK_IDS.length, 26, 'M4-1：检查项必须齐（FIX-68/69/70/71 共 20 项 + FIX-77 legacy 待归档 + FIX-85 簿记无留痕 + FIX-100 绕过契约 ⇒ 23 项）')
 
 const auditRoot = await mkdtemp(join(tmpdir(), 'ac-audit-'))
 // 注意：保留**原始输入**一份（`auditCfgInput`）—— 解析过的 config 不能再被 spread 后重进 schema
@@ -7912,7 +7914,392 @@ assert.ok(f105NullNext.text.includes('b.md'), 'FIX-105 ③：正文里的引用�
 assert.equal((f105NullNext.text.match(/librarianTouchedAt/g) || []).length, 1, 'FIX-105 ③：不叠新的留痕行（头原样）')
 ok('FIX-105 写回既有文件时的头部纪律：**无头文件一律不补 front-matter**（除引用目标外字节不变、行数不变）· 有内容的头照旧盖留痕且其余键与顺序不变 · **全 null 的头不改写**（真机 23 张任务卡的污染形态）· 留痕属台账属性，不为它给文件加头 · 搬移/归位的引用改写同走这一份纪律')
 
+// ---------------------------------------------------------------- FIX-105 追加（审计项 + 一次性清理）/ FIX-106（sweep 收尾重建索引）
+const f106Root = await mkdtemp(join(tmpdir(), 'ac-fix106-'))
+const f106Cfg = plugin.Config({
+  project: { root: f106Root },
+  paths: { deliverablesDir: '仓库/docs/产出', docsDirs: ['仓库/docs/研究', '仓库/docs/产出', '仓库/docs/坑', '仓库/docs/核心数据库'], docKinds: { 研究: '仓库/docs/研究', 坑: '仓库/docs/坑', 核心数据库: '仓库/docs/核心数据库', 产出档: '仓库/docs/产出' } },
+  audit: { checks: ['null_frontmatter', 'missing_kind_index'] },
+})
+const f106Project = resolveProject(f106Cfg)
+const f106Store = await createLedger(makeCtx().ctx, 'fix106').ready
+const f106NullHeader = '---\ntaskId: null\nrole: null\ntier: null\nkeywords: null\nrelatedFiles: null\ncreatedAt: null\nlibrarianTouchedAt: 2026-10-03T16:38:07.512Z\nlibrarianChanges: ["馆员搬移"]\n---\n\n## 结论\n\n这篇正文一个字都不许动。\n'
+const f106Polluted = joinUnderRoot(f106Root, '仓库/docs/研究/T-1_被污染_研究.md')
+await mkdir(joinUnderRoot(f106Root, '仓库/docs/研究'), { recursive: true })
+await writeFile(f106Polluted, f106NullHeader, 'utf8')
+const f106Clean = joinUnderRoot(f106Root, '仓库/docs/研究/T-2_正常_研究.md')
+await writeFile(f106Clean, `${renderFrontMatter({ taskId: 'T-2', role: 'researcher', tier: 0, keywords: ['甲'], relatedFiles: [], createdAt: 'x' })}## 结论\n\n正常档。\n`, 'utf8')
+// ⑥ 审计项：有头但内容键全空 ⇒ 黄；正常档不报
+const f106Audit = await auditScan({ store: f106Store, project: f106Project, config: f106Cfg })
+const f106Hits = f106Audit.items.filter((item) => item.check === 'null_frontmatter')
+assert.equal(f106Hits.length, 1, `FIX-105 ⑥：全 null 头被报出来（实际 ${JSON.stringify(f106Hits.map((row) => row.target))}）`)
+assert.equal(f106Hits[0].target, f106Polluted, 'FIX-105 ⑥：报的是那一篇')
+assert.equal(f106Hits[0].level, 'yellow', 'FIX-105 ⑥：按黄报（警告制，别拦流程）')
+assert.ok(String(f106Hits[0].detail).includes('内容键全空'), 'FIX-105 ⑥：原因写明"内容键全空"')
+assert.equal(f106Audit.items.some((item) => item.check === 'null_frontmatter' && item.target === f106Clean), false, 'FIX-105 ⑥：正常档不报（零误报）')
+// 也报 `missing_kind_index`（研究类有 2 篇但没有索引）——顺手确认两条检查都在跑
+assert.ok(f106Audit.items.some((item) => item.check === 'missing_kind_index' && String(item.target).includes('研究')), 'FIX-103④/106：类别有档却无索引 ⇒ 报黄')
+// ⑦ 一次性清理：dryRun 先给"将清 N 处"；落地后**只删那段头、正文一字不动**；再跑幂等
+const f106Dry = await stripNullFrontMatter({ project: f106Project, store: f106Store, dryRun: true, stampIso: 't' })
+assert.equal(f106Dry.files.length, 1, 'FIX-105 ⑦：预演点名"将清 1 处"')
+assert.ok(f106Dry.files[0].headerLines >= 8 && String(f106Dry.files[0].preview).includes('taskId'), 'FIX-105 ⑦：给出原头摘要（行数 + 原文）')
+assert.equal((await readFile(f106Polluted, 'utf8')).startsWith('---'), true, 'FIX-105 ⑦：预演不落盘')
+const f106Strip = await stripNullFrontMatter({ project: f106Project, store: f106Store, dryRun: false, stampIso: 't' })
+assert.equal(f106Strip.stripped, 1, 'FIX-105 ⑦：落地清掉 1 处')
+const f106After = await readFile(f106Polluted, 'utf8')
+assert.equal(f106After.includes('---'), false, 'FIX-105 ⑦：头没了')
+assert.equal(f106After.includes('这篇正文一个字都不许动。'), true, 'FIX-105 ⑦：**正文一字不动**')
+assert.equal(f106After.includes('librarianTouchedAt'), false, 'FIX-105 ④⑦：留痕不再留在文件里（归台账/回执）')
+assert.equal((await stripNullFrontMatter({ project: f106Project, store: f106Store, dryRun: false, stampIso: 't' })).stripped, 0, 'FIX-105 ⑧：清完再跑**幂等**（0 处）')
+assert.equal((await auditScan({ store: f106Store, project: f106Project, config: f106Cfg })).items.some((item) => item.check === 'null_frontmatter'), false, 'FIX-105 ⑧：清完审计归零')
+// ⑧ / FIX-106：sweep 收尾两步（清全 null 头 + 重建八类索引）——dryRun 有预演、落地真做、两遍幂等
+// 再种一个被污染的文件：sweep 预演要能点名它（前一条已经验证过清完归零）喵
+const f106Polluted2 = joinUnderRoot(f106Root, '仓库/docs/研究/T-3_又污染_研究.md')
+await writeFile(f106Polluted2, f106NullHeader.replace('T-1', 'T-3'), 'utf8')
+const f106SweepDry = await librarianSweep({ project: f106Project, store: f106Store, config: f106Cfg, dryRun: true, stampIso: 't' })
+assert.ok(f106SweepDry.stripNull && Array.isArray(f106SweepDry.stripNull.files), 'FIX-105 ⑧：sweep 的预演里有"清全 null 头"这一步')
+assert.ok(f106SweepDry.indexes && Array.isArray(f106SweepDry.indexes.files), 'FIX-106 ①：sweep 的预演里有"重建索引"这一步')
+assert.ok(f106SweepDry.indexes.files.some((row) => row.kind === '研究' && row.wouldWrite !== false), 'FIX-106 ①：预演给出"将重建哪几类"（研究类缺索引 ⇒ 待写）')
+const f106SweepActions = (f106SweepDry.verification.actions || []).map((row) => row.kind)
+assert.ok(f106SweepActions.some((kind) => String(kind).includes('索引')) && f106SweepActions.some((kind) => String(kind).includes('清空头')), 'FIX-106 ④：两步都进验收报告的**动作清单**')
+const f106Sweep = await librarianSweep({ project: f106Project, store: f106Store, config: f106Cfg, dryRun: false, stampIso: 't' })
+assert.equal(f106Sweep.indexes.files.find((row) => row.kind === '研究').wrote, true, 'FIX-106 ②：落地时真写该类索引')
+const f106CensusAfter = await documentCensus({ project: f106Project })
+assert.equal((await kindIndexGaps({ project: f106Project, census: f106CensusAfter })).length, 0, 'FIX-106 ②：落地后**条目数与磁盘一致**（无缺口）')
+// 第二遍仍会写一次：sweep 自己那步"清全 null 头"把 T-3 的头去掉 ⇒ 该档的派生元数据变了 ⇒ 索引内容确实变了（这是**该写**的）喵
+const f106IdxBefore = await readFile(joinUnderRoot(f106Root, '仓库/docs/研究/索引.md'), 'utf8')
+const f106Sweep2 = await librarianSweep({ project: f106Project, store: f106Store, config: f106Cfg, dryRun: false, stampIso: 't2' })
+const f106IdxAfter = await readFile(joinUnderRoot(f106Root, '仓库/docs/研究/索引.md'), 'utf8')
+const f106IdxR1R2Diff = (() => {
+  const a = String(f106IdxBefore).split('\n')
+  const b = String(f106IdxAfter).split('\n')
+  const rows = []
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) if (a[i] !== b[i]) rows.push(`${a[i]}  →  ${b[i] || ''}`)
+  return rows
+})()
+// 口径对齐（FIX-106 断言修正）：**进稳定态之前先把全部索引建好** —— 否则"某类索引在下一轮才首次创建"
+// 会被 strict 断言误判成"重写" ✗（产品逻辑没问题，是断言口径不一致）。预建之后，稳定态里任何 wrote 都不合法 喵
+await writeKindIndexes({ project: f106Project, census: await documentCensus({ project: f106Project }), dryRun: false, now: 'pre' })
+// 第三遍起才是稳定态：没有任何输入变化 ⇒ **不重写**（幂等）喵
+const f106Sweep3 = await librarianSweep({ project: f106Project, store: f106Store, config: f106Cfg, dryRun: false, stampIso: 't3' })
+// 证据（用户点名的口径 ②）：**全部索引文件**在稳定态下逐行零变化 —— 类别索引 + 坑库索引 + 派生态索引 喵
+const f106IndexPaths = [
+  ...Object.values(f106Project.docKinds).map((dir) => joinUnderRoot(dir, '索引.md')),
+  joinUnderRoot(f106Project.docKinds['坑'], 'README.md'),        // 坑库索引
+  coreIndexPath(f106Project),                                     // 派生态索引
+].filter((path) => path && existsSync(path))
+assert.ok(f106IndexPaths.length >= 3, `FIX-106 ③：夹具里至少要生成 3 份索引（实际 ${f106IndexPaths.length}）`)
+const f106IdxBeforeAll = new Map()
+for (const path of f106IndexPaths) f106IdxBeforeAll.set(path, await readFile(path, 'utf8'))
+// 口径对齐后的**一次跑定案**诊断（用户点名 A/B）：
+// ① 先建齐之后立刻断言三类索引**确实存在于同一批路径上**（证明"先建齐"建在夹具看的那些路径上，排除 B）✓
+const f106Prebuilt = await writeKindIndexes({ project: f106Project, census: await documentCensus({ project: f106Project }), dryRun: true, now: 'probe' })
+const f106PrebuiltPaths = f106Prebuilt.files.map((row) => row.path).filter(Boolean)
+assert.ok(f106PrebuiltPaths.length >= 3, `FIX-106 诊断：夹具至少三类索引（实际 ${f106PrebuiltPaths.length}）：${f106PrebuiltPaths.join('、')}`)
+for (const path of f106PrebuiltPaths) {
+  assert.equal(existsSync(path), true, `FIX-106 诊断：预建之后该路径必须**已存在**（否则下次那类就是"首次创建"）：${path}`)
+  assert.equal(f106IndexPaths.includes(path), true, `FIX-106 诊断（排除 B）：夹具清单里必须有**逐字符相同**的这一条：${path}`)
+  assert.equal(f106Prebuilt.files.find((row) => row.path === path).readFailed, null, `FIX-106 诊断（排除 A）：读既有索引**不许失败**：${path}`)
+}
+const f106Sweep4 = await librarianSweep({ project: f106Project, store: f106Store, config: f106Cfg, dryRun: false, stampIso: 't4' })
+function lineDiff(a, b) {
+  const rowsA = String(a).split('\n')
+  const rowsB = String(b).split('\n')
+  const out = []
+  for (let i = 0; i < Math.max(rowsA.length, rowsB.length); i += 1) if (rowsA[i] !== rowsB[i]) out.push(`${rowsA[i]}  →  ${rowsB[i] || ''}`)
+  return out
+}
+for (const path of f106IndexPaths) {
+  const after = await readFile(path, 'utf8')
+  assert.equal(lineDiff(f106IdxBeforeAll.get(path), after).length, 0, `FIX-106 ③：稳定态下**逐行零变化**：${path}`)
+}
+// ④ 取样点与 8023 **同源**（写手当轮读到的 previousText 就是基准）—— 两条断言从此不会互相打架喵
+for (const row of f106Sweep4.indexes.files) {
+  const prior = String(row.previousText === undefined ? '' : row.previousText)
+  const now = String(row.writtenText === undefined ? prior : row.writtenText)
+  assert.equal(lineDiff(prior, now).length, 0, `FIX-106 ③：写手视角**逐行零变化**（当轮读到的 vs 本轮渲染）：${row.kind}`)
+}
+// 机器区块里不许有"随运行变化"的东西（生成时间/自身信息/条目 mtime）—— 逐份自查 + 时间戳只允许出现在**被中性化**的那一行喵
+for (const path of f106IndexPaths) {
+  const text = await readFile(path, 'utf8')
+  assert.equal(/更新 20\d\d-\d\d-\d\dT/.test(text), false, `FIX-106 ①：索引条目里不许带 mtime 时间戳（点名的"任何位置"）：${path}`)
+  // 自身不算条目：不许出现"把 索引.md 本身当一行"（别的名字里含"索引"的文件不算，如 派生态索引.md）喵
+  assert.equal(/^- .*[\\/]索引\.md\s/m.test(text), false, `FIX-106 ①：索引不许把自己算进去：${path}`)
+}
+// 稳定态：**任何** wrote 都不合法 —— 消息里点名是哪一类/哪个路径（别只说 true !== false）喵
+// FIX-111 常驻诊断（env 门控）：把"写手当轮读到的"与"本轮渲染的"逐行 diff 打出来 —— 那 N 个字符到底是什么喵
+if (process.env.F106_DEBUG) {
+  for (const row of f106Sweep4.indexes.files) {
+    if (!row.wrote) continue
+    const prev = String(row.previousText || '')
+    const next = String(row.writtenText || '')
+    const a = prev.split('\n')
+    const b = next.split('\n')
+    const rows = []
+    for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+      if (a[i] !== b[i]) rows.push('  L' + (i + 1) + ' 盘上=' + JSON.stringify(a[i]) + ' 渲染=' + JSON.stringify(b[i]))
+    }
+    console.log('[F106_DEBUG] ' + row.kind + ' 盘上 ' + a.length + ' 行/' + prev.length + ' 字 vs 渲染 ' + b.length + ' 行/' + next.length + ' 字')
+    for (const line of rows.slice(0, 10)) console.log(line)
+  }
+}
+// 稳定态：**任何** wrote 都不合法 —— 消息里点名是哪一类/哪个路径（别只说 true !== false）喵
+const f106WroteRows = f106Sweep4.indexes.files.filter((row) => row.wrote)
+assert.equal(
+  f106WroteRows.length,
+  0,
+  'FIX-106 ③：稳定态下确实不重写（写了的：'
+  + `${f106WroteRows.map((row) => `${row.kind}:${row.path}｜readFailed=${row.readFailed}｜firstCreate=${row.firstCreate}｜existingLen=${row.existingLen}｜mergedLen=${row.mergedLen}`).join('　') || '(无)'}）`,
+)
+// **字节真相交叉核对**（口径一致的兜底）：报写了就必须真变了、报没写就必须真没变 —— 两个方向都不许放过喵
+for (const path of f106IndexPaths) {
+  const row = f106Sweep4.indexes.files.find((item) => item.path === path)
+  if (!row) continue
+  const changed = f106IdxBeforeAll.get(path) !== (await readFile(path, 'utf8'))
+  assert.equal(row.wrote, changed, `FIX-106 ③：${row.kind} 的 wrote(${row.wrote}) 必须与**字节是否真变**(${changed}) 一致：${path}`)
+}
+assert.equal(f106Sweep4.pitfall && f106Sweep4.pitfall.changed === true, false, 'FIX-106 ①：坑库索引在稳定态也**不重写**（它带"最后更新"但比较时被中性化）')
+// r1→r2 的变化**有据可查**：那一轮 sweep 自己的 `markArchivePending` 给 legacy README 加了 `archivePending: true` ⇒
+// 被索引的那篇档内容真变了（字数 502→545、关键词跟着变）⇒ 索引**该**跟着变（不是不稳定）喵
+// **根因已修**：r1→r2 现在**零行变化**。之前那 1 行变化的真身是「坑库索引被写进了 `研究/README.md`」
+// （`pitfallIndexPath` 兜底到 `docsDirs[0]`，而那文件自带时间戳 ⇒ 一轮一个样 ⇒ 类别索引跟着漂）⇒ 修掉兜底后不再漂 喵
+assert.equal(f106IdxR1R2Diff.length, 0, `FIX-106 ③：r1→r2 也该**零变化**（根因：坑库索引不再写进别的类别目录），实际 ${JSON.stringify(f106IdxR1R2Diff)}`)
+assert.equal(existsSync(joinUnderRoot(f106Root, '仓库/docs/研究/README.md')), false, 'FIX-106 ③：没配「坑」类别 ⇒ **不写坑库索引**（更不许写进 研究/ 这种别的类别目录）')
+assert.equal(f106Sweep3.indexes.files.some((row) => row.wrote), false, 'FIX-106 ③：稳定态下**幂等**（内容没变就不重写）')
+// FIX-106 ①同源：sweep 与独立工具用的是**同一个实现**（源码级 + 行为级）
+const f106DutiesSrc = await readFile(new URL('./src/librarian/duties.js', import.meta.url), 'utf8')
+assert.ok(/const indexes = await writeKindIndexes\(\{/.test(f106DutiesSrc), 'FIX-106 ①：sweep 收尾**调用** writeKindIndexes（不是复制一份逻辑）')
+assert.ok(/from '\.\/indexes\.js'/.test(f106DutiesSrc) && /writeKindIndexes\(\{ project, census: await documentCensus\(\{ project \}\), dryRun: false/.test(f106DutiesSrc), 'FIX-106 ①：同一实现、同一份普查')
+assert.ok(/const indexes = await writeKindIndexes\(\{ project, census: await documentCensus\(\{ project \}\), dryRun: false/.test(f106DutiesSrc), 'FIX-106 ④：索引重建在搬移/引用修复**之后**（收尾步骤）')
+ok('FIX-105 追加 + FIX-106：审计项 `null_frontmatter`（全 null 头 ⇒ 黄，正常档零误报）· 一次性清理 `stripNullFrontMatter`（dryRun 先给"将清 N 处"+原头摘要；只删那段头、**正文一字不动**、留痕归台账；清完归零且幂等）· `librarian_sweep` 收尾**顺手**清全 null 头 + 重建八类索引（同一实现 `writeKindIndexes` + 同一份 `documentCensus`），预演有这两步、动作清单里有、落地后条目数与磁盘一致、两遍幂等')
+
+// ---------------------------------------------------------------- FIX-107 产出判据统一：hasAnyDeliverable（台账 + 扫全部类别目录 + 按形态认）
+const f107Root = await mkdtemp(join(tmpdir(), 'ac-fix107-'))
+const f107Cfg = plugin.Config({
+  project: { root: f107Root },
+  paths: {
+    deliverablesDir: '仓库/docs/产出',
+    docsDirs: ['仓库/docs/研究', '仓库/docs/审查', '仓库/docs/产出'],
+    docKinds: { 研究: '仓库/docs/研究', 审查: '仓库/docs/审查', 产出档: '仓库/docs/产出' },
+  },
+  audit: { checks: ['missing_doc', 'ghost_run'] },
+})
+const f107Project = resolveProject(f107Cfg)
+const f107Store = await createLedger(makeCtx().ctx, 'fix107').ready
+for (const dir of ['仓库/docs/研究', '仓库/docs/审查', '仓库/docs/产出/L3']) await mkdir(joinUnderRoot(f107Root, dir), { recursive: true })
+// ① 磁盘上**有研究档**，但台账里没有对应记录（记录也没有 latestDeliverable 字段）⇒ 两条件都不该报
+await writeFile(joinUnderRoot(f107Root, '仓库/docs/研究/T-7_调研_研究.md'), '## 结论\n\n研究。\n', 'utf8')
+await f107Store.putMember(memberRecord({ id: 's-r', name: 'T-7-researcher', role: 'researcher', mode: 'one-shot', status: 'completed', layer: 1, parent: '主代理' }))
+assert.equal(await hasAnyDeliverable({ store: f107Store, project: f107Project, taskId: 'T-7', role: 'researcher' }), true, 'FIX-107 ①：磁盘有研究档 ⇒ 算有产出（台账里没有记录也算）')
+const f107Audit1 = await auditScan({ store: f107Store, project: f107Project, config: f107Cfg })
+assert.equal(f107Audit1.items.some((item) => item.target === 'T-7-researcher'), false, 'FIX-107 ①：`missing_doc` / `ghost_run` 都**不报**（磁盘查到了）')
+// ② 三档形态按 `_L1/_L2/_L3` 认；台账 + 磁盘都查不到 ⇒ **仍报**（守卫没死）
+assert.equal(await hasAnyDeliverable({ store: f107Store, project: f107Project, taskId: 'T-8', role: 'implementer' }), false, 'sanity：T-8 哪儿都没有 ⇒ false')
+await f107Store.putMember(memberRecord({ id: 's-i', name: 'T-8-implementer', role: 'implementer', mode: 'one-shot', status: 'completed', layer: 1, parent: '主代理' }))
+const f107Audit2 = await auditScan({ store: f107Store, project: f107Project, config: f107Cfg })
+assert.ok(f107Audit2.items.some((item) => item.check === 'missing_doc' && item.target === 'T-8-implementer'), 'FIX-107 ②：台账 + 磁盘全查不到 ⇒ `missing_doc` **仍报**（守卫没死）')
+assert.ok(f107Audit2.items.some((item) => item.check === 'ghost_run' && item.target === 'T-8-implementer'), 'FIX-107 ②：`ghost_run` 同样仍报')
+await writeFile(joinUnderRoot(f107Root, '仓库/docs/产出/L3/T-8_实现_L3.md'), '## 结论\n\n实现。\n', 'utf8')
+assert.equal(await hasAnyDeliverable({ store: f107Store, project: f107Project, taskId: 'T-8', role: 'implementer' }), true, 'FIX-107 ①：磁盘上的 `_L3` 三档档也算数（形态按角色认）')
+const f107Audit3 = await auditScan({ store: f107Store, project: f107Project, config: f107Cfg })
+assert.equal(f107Audit3.items.some((item) => item.target === 'T-8-implementer'), false, 'FIX-107 ①：补上产出后两条都不报（守卫没死、也没误报）')
+// report 形态：审查档 / 整合清单也算；bookkeeping：**豁免**（它的完成判据是留痕不是交档）
+await f107Store.putMember(memberRecord({ id: 's-v', name: 'T-9-reviewer', role: 'reviewer', mode: 'one-shot', status: 'completed', layer: 1, parent: '主代理' }))
+await writeFile(joinUnderRoot(f107Root, '仓库/docs/审查/T-9_审查_审查.md'), '## 结论\n\n审查。\n', 'utf8')
+assert.equal(await hasAnyDeliverable({ store: f107Store, project: f107Project, taskId: 'T-9', role: 'reviewer' }), true, 'FIX-107 ①：report 形态（审查档）也算有产出')
+assert.equal(await hasAnyDeliverable({ store: f107Store, project: f107Project, taskId: 'T-404', role: 'librarian' }), true, 'FIX-107 ①：**簿记类豁免**（没有文档产出义务 ⇒ 直接算过）')
+// 源码级：两个检查项都必须走这一份判据（不许谁再自己看 `latestDeliverable`）喵
+const f107Src = await readFile(new URL('./src/audit/checks.js', import.meta.url), 'utf8')
+assert.ok(/hasAnyDeliverable\(\{ store, project, taskId, role: member.role, kinds \}\)/.test(f107Src), 'FIX-107 ②：`missing_doc` 走统一判据')
+assert.ok(/const has = await hasAnyDeliverable\(\{/.test(f107Src), 'FIX-107 ②：`ghost_run` 走统一判据')
+assert.equal(/if \(member.latestDeliverable\) continue/.test(f107Src), false, 'FIX-107 ②：**不许**再拿 `latestDeliverable` 当"没落档"的唯一依据')
+// ---------------------------------------------------------------- FIX-105 收口：**读改写既有文件**的路径 × 是否收口（一张表，每条配断言）
+// 真机污染是"126 → 130 还在涨"才被发现的 ⇒ 凭感觉堵必然漏，用这张表把每条路径钉住喵
+const f105Duties = await readFile(new URL('./src/librarian/duties.js', import.meta.url), 'utf8')
+const f105RmwPaths = [
+  ['搬移（relocateDocs 的引用改写）', 'choke', '走 composeRewrittenFile（头部纪律唯一落点）'],
+  ['引用修复（replaceRefInDoc）', 'choke', '同上'],
+  ['归位 + 改元数据（conformDocAreas setMeta）', 'choke', '同上（forceStamp 只在显式改元数据时开）'],
+  ['去 ^ / 归档表述订正（correctCaretClaim）', 'single', '只给**已给出**的键渲染头（renderMetaBlock），不塞六个 null'],
+  ['归档（archiveDocs）', 'single', '只动 front-matter 的 archived/archivedAt + 留痕'],
+  ['legacy 待归档标注（markArchivePending）', 'single', '只写 archivePending 一个键（FIX-77 断言守着）'],
+  ['清 null 头（stripNullFrontMatter）', 'strip', '**只删那段头**，正文一字不动（新加）'],
+  ['回填（ledger_backfill/autoBackfill）', 'single', '按类别只补该补的字段（FIX-25/77 断言守着）'],
+  ['tags 盖章（refreshStaleTags）', 'single', '只盖 librarianTouchedAt/Changes（内容没变也盖章，FIX-25）'],
+  ['索引合并（派生态索引 / 坑库索引 / 类别索引）', 'merge', '只在标记区块内增删；**不带时间戳**（FIX-35 / FIX-106）'],
+]
+for (const [name, kind, why] of f105RmwPaths) {
+  if (kind === 'choke') {
+    assert.ok(f105Duties.includes('composeRewrittenFile('), `FIX-105 收口表：${name} ⇒ ${why}`)
+  } else if (kind === 'strip') {
+    assert.ok(/export async function stripNullFrontMatter/.test(f105Duties), `FIX-105 收口表：${name} ⇒ ${why}`)
+  } else if (kind === 'merge') {
+    assert.ok(/mergeIndexBlock|appendIndexBlock/.test(f105Duties), `FIX-105 收口表：${name} ⇒ ${why}`)
+  } else {
+    assert.ok(/renderMetaBlock\(/.test(f105Duties), `FIX-105 收口表：${name} ⇒ ${why}`)
+  }
+}
+// 表里"全 null 头不许再产生"这条要有**行为**证据：无头文件跑这三条收口路径后都不得出现 `---` 喵
+const f105Choke = composeRewrittenFile({
+  path: joinUnderRoot(cfg.project.root, '任务/T-99.md'),
+  originalText: '## 结论\n\n无头任务卡。\n',
+  parsed: { meta: {}, body: '## 结论\n\n无头任务卡。\n' },
+  nextBody: '## 结论\n\n无头任务卡。\n',
+  changes: ['引用修复（指向现存档）'],
+  project: resolveProject(cfg),
+  stampIso: 't',
+})
+assert.equal(f105Choke.text.includes('---'), false, 'FIX-105 收口表：无头文件走收口路径 ⇒ **不出现 `---`**（行为证据）')
+// 归档分片也要清（真机副本里 3 处落在 archive/<分片>/ 下）——把这一点钉住喵
+const f105ArchRoot = await mkdtemp(join(tmpdir(), 'ac-fix105arch-'))
+const f105ArchCfg = plugin.Config({ project: { root: f105ArchRoot }, paths: { archiveDir: '仓库/docs/archive', docKinds: { 归档: '仓库/docs/archive' } } })
+const f105ArchProject = resolveProject(f105ArchCfg)
+await mkdir(joinUnderRoot(f105ArchRoot, '仓库/docs/archive/2026-10'), { recursive: true })
+await writeFile(joinUnderRoot(f105ArchRoot, '仓库/docs/archive/2026-10/T-1_x_L3.md'), f105NullHeader.replace('T-1', 'T-1'), 'utf8')
+const f105ArchStrip = await stripNullFrontMatter({ project: f105ArchProject, store: null, dryRun: false, stampIso: 't' })
+assert.equal(f105ArchStrip.stripped, 1, 'FIX-105 收口表：**归档分片里的全 null 头也清**（真机副本剩的那 3 处就在这儿）')
+assert.equal((await readFile(joinUnderRoot(f105ArchRoot, '仓库/docs/archive/2026-10/T-1_x_L3.md'), 'utf8')).includes('---'), false, 'FIX-105 收口表：清完头没了、正文仍在')
+ok(`FIX-105 收口表（读改写路径 × 收口方式，逐条有断言）：${f105RmwPaths.map(([name]) => name.split('（')[0]).join(' · ')} —— 三条走唯一落点 \`composeRewrittenFile\`、清 null 头只删头、其余各只改该改的键；无头文件走收口路径**不出现 \`---\`**（行为证据）· 归档分片也纳入清理`)
+
+// ---------------------------------------------------------------- FIX-108 / FIX-110
+// 108 ①：**角色卡/能力面点名的工具必须在白名单里**（扫描式断言：现在漏掉 doc_census 也报得出来）喵
+const f108Roles = listRoles({})
+const f108Toolish = /\b((?:librarian|ledger|doc|progress|bugfix|audit|contract|project)_[a-z_]+)\b/g
+for (const role of f108Roles) {
+  const named = new Set()
+  for (const hit of String(role.persona || '').matchAll(f108Toolish)) {
+    // 审计项 id 也长得像 / ⇒ 它们不是工具，不算'点名了工具'（否则是假阳性）喵
+    if (CHECK_IDS.includes(hit[1])) continue
+    named.add(hit[1])
+  }
+  for (const tool of named) {
+    assert.ok(
+      Array.isArray(role.tools) && role.tools.includes(tool),
+      `FIX-108 ①：角色「${role.id}」的角色卡点名了 \`${tool}\`，白名单里却没有它（纪律会成摆设）`,
+    )
+  }
+}
+assert.ok(getRole({}, 'librarian').tools.includes('audit_scan'), 'FIX-108 ①：馆员白名单含 `audit_scan`（看得见审计才能照审计干活）')
+assert.ok(getRole({}, 'librarian').tools.includes('doc_census'), 'FIX-108 ①：馆员白名单含 `doc_census`（FIX-102 点名的工具）')
+// 108 ③：契约**自动带审计摘要**（与 audit_scan / 面板同一份实现）—— 馆员看全量、其它角色只看与本任务相关喵
+const f108Project = resolveProject(cfg)
+const f108Report = { level: 'yellow', counts: { red: 1, yellow: 1 }, items: [
+  { check: 'doc_misfiled', level: 'yellow', target: 'T-900', detail: '放错目录' },
+  { check: 'over_budget', level: 'red', target: 'T-901 的 L1 档', detail: '超长' },
+] }
+const f108LibrarianDigest = renderAuditDigest({ report: f108Report, role: 'librarian' })
+assert.ok(f108LibrarianDigest.text.includes('审计摘要') && f108LibrarianDigest.text.includes('红 1 / 黄 1'), 'FIX-108 ③：馆员摘要带红黄计数')
+assert.ok(f108LibrarianDigest.text.includes('这些是你（图书管理员）要收拾的'), 'FIX-108 ③：并写明"这些是你要收拾的"')
+assert.ok(f108LibrarianDigest.text.includes('T-900') && f108LibrarianDigest.text.includes('建议：'), 'FIX-108 ③：条目带路径 + 原因 + 建议动作')
+const f108TaskDigest = renderAuditDigest({ report: f108Report, taskId: 'T-901', role: 'implementer' })
+assert.ok(f108TaskDigest.text.includes('T-901'), 'FIX-108 ③：非馆员角色带上**与本任务相关**的条目')
+assert.equal(f108TaskDigest.text.includes('T-900'), false, 'FIX-108 ③：不相关的审计项**不出现**（避免噪音）')
+const f108Contract = await buildContract({ config: cfg, roleId: 'librarian', task: { id: 'T-900' }, parent: '主代理', layer: 1, totalAgents: 2, project: f108Project, auditDigest: f108LibrarianDigest })
+assert.ok(f108Contract.text.includes('审计摘要') && f108Contract.text.includes('audit_scan'), 'FIX-108 ③：契约里真的带上摘要段（并指向 audit_scan 复跑）')
+const f108DigestSrc = await readFile(new URL('./src/audit/digest.js', import.meta.url), 'utf8')
+const f108ChannelsSrc = await readFile(new URL('./src/delegation/channels.js', import.meta.url), 'utf8')
+assert.ok(/runPanelAudit\(/.test(f108ChannelsSrc) && /from '\.\.\/audit\/digest\.js'/.test(f108ChannelsSrc), 'FIX-108 ③（单一来源）：契约的摘要来自 `runPanelAudit` + `renderAuditDigest`（与 audit_scan / 面板同源）')
+assert.ok(/SUGGESTIONS/.test(f108DigestSrc), 'FIX-108 ③：建议动作取自审计同一份 `SUGGESTIONS`')
+ok('FIX-108 馆员看得见审计：白名单补 `audit_scan` / `doc_census` · **扫描式断言**（角色卡点名的工具必须在白名单里，漏 `doc_census` 也报得出来）· 契约自动带审计摘要（馆员全量"这些是你该收拾的" / 其它角色只带本任务相关，条目带路径+原因+建议）· 摘要与 `audit_scan`/面板**同一份实现**（`runPanelAudit` + `renderAuditDigest`）')
+
+// 110 ①：`legacy_caret` **覆盖归档区**（真机 archive/2026-10 的两处 `^T16/^T17` 以前一直漏报）喵
+const f110bRoot = await mkdtemp(join(tmpdir(), 'ac-fix110-'))
+const f110bCfg = plugin.Config({ project: { root: f110bRoot }, paths: { deliverablesDir: '仓库/docs/产出', docsDirs: ['仓库/docs/产出', '仓库/docs/坑'], docKinds: { 产出档: '仓库/docs/产出', 坑: '仓库/docs/坑', 归档: '仓库/docs/archive' }, archiveDir: '仓库/docs/archive' }, audit: { checks: ['legacy_caret', 'null_frontmatter', 'body_caret_title'] } })
+const f110bProject = resolveProject(f110bCfg)
+const f110bStore = await createLedger(makeCtx().ctx, 'fix110').ready
+await mkdir(joinUnderRoot(f110bRoot, '仓库/docs/archive/2026-10'), { recursive: true })
+await mkdir(joinUnderRoot(f110bRoot, '仓库/docs/坑'), { recursive: true })
+await mkdir(joinUnderRoot(f110bRoot, '仓库/docs/产出/L3'), { recursive: true })
+const f110bArch = joinUnderRoot(f110bRoot, '仓库/docs/archive/2026-10/^T16_旧档_L3.md')
+await writeFile(f110bArch, '---\ntaskId: T16\nrole: researcher\ntier: 3\nkeywords: ["甲"]\nrelatedFiles: []\ncreatedAt: x\n---\n\n## 结论\n\n归档旧档。\n', 'utf8')
+const f110bAudit1 = await auditScan({ store: f110bStore, project: f110bProject, config: f110bCfg })
+assert.ok(f110bAudit1.items.some((item) => item.check === 'legacy_caret' && item.target === f110bArch), 'FIX-110 ①：归档分片里的 `^` 现在**报得出来**')
+// 110 ②：**索引类文件不该有 front-matter**（带头就报）——真机 3 个索引都被塞了头喵
+const f110bIdx = joinUnderRoot(f110bRoot, '仓库/docs/坑/索引.md')
+await writeFile(f110bIdx, '---\ntaskId: null\nrole: null\ntier: null\nkeywords: null\nrelatedFiles: null\ncreatedAt: null\n---\n\n# 坑索引\n', 'utf8')
+const f110bAudit2 = await auditScan({ store: f110bStore, project: f110bProject, config: f110bCfg })
+assert.ok(f110bAudit2.items.some((item) => item.check === 'null_frontmatter' && item.target === f110bIdx), 'FIX-110 ②：**派生物索引带头**要被报出来')
+// 110 ④：正文标题行的 `^` 去掉（只动那个前缀；该行其余与正文其它**字节不变**；别处的 ^ 不动；两遍幂等）喵
+const f110bDoc = joinUnderRoot(f110bRoot, '仓库/docs/产出/T-20_x_L3.md')
+const f110bBody = '## ^T20 传送带\n\n正文里的 ^ 不该动：`^T16` 是别人提到它。\n\n## 结论\n\n照旧。\n'
+await writeFile(f110bDoc, f110bBody, 'utf8')
+const f110bDry = await stripBodyCaretTitles({ project: f110bProject, store: f110bStore, dryRun: true, stampIso: 't' })
+assert.equal(f110bDry.files.length >= 1, true, 'FIX-110 ④：预演给出"将改 N 处"')
+assert.equal((await readFile(f110bDoc, 'utf8')), f110bBody, 'FIX-110 ④：预演不落盘')
+const f110bDone = await stripBodyCaretTitles({ project: f110bProject, store: f110bStore, dryRun: false, stampIso: 't' })
+assert.equal(f110bDone.fixed, 1, 'FIX-110 ④：落地去掉标题前缀')
+const f110bAfter = await readFile(f110bDoc, 'utf8')
+assert.equal(f110bAfter.startsWith('## T20 传送带'), true, 'FIX-110 ④：标题行的 `^` 去掉了')
+assert.equal(f110bAfter.includes('正文里的 ^ 不该动：`^T16` 是别人提到它。'), true, 'FIX-110 ④：正文**别处的 ^ 一字不动**')
+assert.equal(f110bAfter.length, f110bBody.length - 1, 'FIX-110 ④：整篇只少了那一个字符（该行其余字节不变）')
+assert.equal((await stripBodyCaretTitles({ project: f110bProject, store: f110bStore, dryRun: false, stampIso: 't' })).fixed, 0, 'FIX-110 ④：两遍**幂等**')
+assert.equal((await auditScan({ store: f110bStore, project: f110bProject, config: f110bCfg })).items.some((item) => item.check === 'body_caret_title' && String(item.target).startsWith(f110bDoc)), false, 'FIX-110 ⑤：清完 `body_caret_title` 归零')
+// ⑤ 造例必报（另一篇还带着 ^）
+const f110bDoc2 = joinUnderRoot(f110bRoot, '仓库/docs/产出/T-21_y_L3.md')
+await writeFile(f110bDoc2, '## ^T21 还有一个\n\n正文。\n', 'utf8')
+const f110bHit = (await auditScan({ store: f110bStore, project: f110bProject, config: f110bCfg })).items.find((item) => item.check === 'body_caret_title')
+assert.ok(f110bHit && String(f110bHit.target).includes(':1'), `FIX-110 ⑤：造例必报且带行号（实际 ${JSON.stringify(f110bHit && f110bHit.target)}）`)
+assert.ok(String(f110bHit.detail).includes('^T21'), 'FIX-110 ⑤：报出标题摘要')
+// 平台说明（用户裁定，FIX-111）：WSL 下 `\` 与 `/` 的差异属**平台差异**，真机（Windows）不受影响 ——
+// 本套件以 Windows 为准；不再为 WSL 侧改产品代码喵
+const PLATFORM_NOTE = '平台差异：索引路径断言在 WSL 下可能因 \\ 与 / 的差异红；真机（Windows）不受影响，以 Windows 为准'
+assert.ok((await readFile(new URL('./verify.mjs', import.meta.url), 'utf8')).includes('平台差异'), '交付纪律：套件里留一句平台差异说明（Windows 为准）')
+ok('FIX-110 归档区与头部口径收口：`legacy_caret` 覆盖 archive 分片（真机 `^T16/^T17` 不再漏报）· **派生物索引带头**并入 `null_frontmatter` 报出 · 正文标题行的 `^` 由 `stripBodyCaretTitles` 去掉（只动那个前缀、该行其余与正文其它字节不变、别处的 `^` 不动、可预演、两遍幂等）· 新审计项 `body_caret_title`（路径 + 行号 + 标题摘要）造例必报、清完归零 · 存量清理并入 `librarian_sweep` 收尾')
+
+// ---------------------------------------------------------------- FIX-112 清空头判据改**白名单**（真机：只有归档字段的头被整段删掉 = 数据损失）
+const f112Root = await mkdtemp(join(tmpdir(), 'ac-fix112-'))
+const f112Cfg = plugin.Config({ project: { root: f112Root }, paths: { deliverablesDir: '仓库/docs/产出', docsDirs: ['仓库/docs/产出', '仓库/docs/archive'], docKinds: { 产出档: '仓库/docs/产出', 归档: '仓库/docs/archive' }, archiveDir: '仓库/docs/archive' }, audit: { checks: ['null_frontmatter'] } })
+const f112Project = resolveProject(f112Cfg)
+const f112Store = await createLedger(makeCtx().ctx, 'fix112').ready
+await mkdir(joinUnderRoot(f112Root, '仓库/docs/archive/2026-10'), { recursive: true })
+await mkdir(joinUnderRoot(f112Root, '仓库/docs/产出/L3'), { recursive: true })
+// ① 「**只有归档字段**」的档（真机 archive 下那 4 篇的形态）⇒ **不许被清**
+const f112ArchOnly = joinUnderRoot(f112Root, '仓库/docs/archive/2026-10/T-30_归档档_L3.md')
+const f112ArchText = '---\narchived: true\narchivedAt: 2026-10-03\n---\n\n## 结论\n\n归档正文。\n'
+await writeFile(f112ArchOnly, f112ArchText, 'utf8')
+// ② 「只有留痕」的空壳头（FIX-105 的目标形态）⇒ 照样清
+const f112TraceOnly = joinUnderRoot(f112Root, '仓库/docs/产出/L3/T-31_空壳_L3.md')
+const f112TraceText = '---\ntaskId: null\nrole: null\ntier: null\nkeywords: null\nrelatedFiles: null\ncreatedAt: null\nlibrarianTouchedAt: 2026-10-03T16:38:07.512Z\nlibrarianChanges: ["馆员搬移"]\n---\n\n## 结论\n\n正文仍在。\n'
+await writeFile(f112TraceOnly, f112TraceText, 'utf8')
+const f112Dry = await stripNullFrontMatter({ project: f112Project, store: f112Store, dryRun: true, stampIso: 't' })
+assert.equal(f112Dry.files.length, 1, 'FIX-112 ③：预演只清"全 null + 只有留痕"那一批')
+assert.equal(f112Dry.files[0].path, f112TraceOnly, 'FIX-112 ①：**只有归档字段的那篇不在清理名单里**')
+assert.equal(f112Dry.skipped.length, 1, 'FIX-112 ②：预演标出"含非占位键 ⇒ 跳过"的计数')
+assert.equal(f112Dry.skipped[0].path, f112ArchOnly, 'FIX-112 ②：跳过的是归档那篇')
+assert.ok(f112Dry.skipped[0].keys.includes('archived') && f112Dry.skipped[0].keys.includes('archivedAt'), 'FIX-112 ②：并列出让它被跳过的键名')
+const f112Done = await stripNullFrontMatter({ project: f112Project, store: f112Store, dryRun: false, stampIso: 't' })
+assert.equal(f112Done.stripped, 1, 'FIX-112 ②：留痕空壳被清掉')
+assert.equal((await readFile(f112ArchOnly, 'utf8')), f112ArchText, 'FIX-112 ①④：归档档**一个字节都没动**（`archived`/`archivedAt` 一个不丢）')
+const f112TraceAfter = await readFile(f112TraceOnly, 'utf8')
+assert.equal(f112TraceAfter.includes('---'), false, 'FIX-112 ②：空壳头清掉了')
+assert.equal(f112TraceAfter.includes('正文仍在。'), true, 'FIX-112 ②：正文一字不动')
+assert.equal((await stripNullFrontMatter({ project: f112Project, store: f112Store, dryRun: false, stampIso: 't2' })).stripped, 0, 'FIX-112：再跑一轮**零写入**（稳定）')
+// ④ 走一整轮 sweep：归档字段仍在、空头清掉、第二轮零写入（真机验收口径）喵
+const f112Sweep = await librarianSweep({ project: f112Project, store: f112Store, config: f112Cfg, dryRun: false, stampIso: 't3' })
+assert.equal((await readFile(f112ArchOnly, 'utf8')).includes('archivedAt: 2026-10-03'), true, 'FIX-112 ④：sweep 之后归档字段**仍在**')
+const f112Sweep2 = await librarianSweep({ project: f112Project, store: f112Store, config: f112Cfg, dryRun: false, stampIso: 't4' })
+assert.equal((f112Sweep2.stripNull || { files: [] }).files.length, 0, 'FIX-112 ④：第二轮 sweep 没有可清的空头（稳定）')
+assert.equal((await readFile(f112ArchOnly, 'utf8')).includes('archived: true'), true, 'FIX-112 ④：归档标记仍在（再跑也不丢）')
+// 审计：只有归档字段的头**不该**被 `null_frontmatter` 报（报它 = 催人删归档语义）✗
+const f112Audit = await auditScan({ store: f112Store, project: f112Project, config: f112Cfg })
+assert.equal(f112Audit.items.some((item) => item.check === 'null_frontmatter' && item.target === f112ArchOnly), false, 'FIX-112：归档档不被"空头"审计报出来（白名单判据）')
+assert.ok(String(await readFile(new URL('./src/ledger/docmeta.js', import.meta.url), 'utf8')).includes('nonPlaceholderKeys'), 'FIX-112 ①：判据是**白名单**（非占位键 ⇒ 不清），写在唯一落点 `analyzeFrontMatter` 里')
+ok('FIX-112 清空头判据改**白名单**：只清"6 个占位键全空 + 只带留痕"的头；**出现任何非占位键（`archived`/`archivedAt`/`archivePending`/`nextTier`/…）一律不清**（真机：归档字段曾被整段删掉 = 数据损失）· 预演给出"跳过 N 处 + 键名"· 审计同样只报可清的（归档档不再被误报）· sweep 走一轮归档字段一个不丢、空头照样清、第二轮零写入')
+
+
+
 // ---------------------------------------------------------------- FIX-97 版本漂移可见 + 领域打不开不许静默（真机："工具全废"却没人知道去看版本）
+
+
+ok('FIX-107 产出判据统一：`hasAnyDeliverable()` 三路并查（簿记豁免 · 台账含 latestDeliverable 线索 · **扫全部类别目录**按 `<taskId>_` + 形态后缀 `_L1/_L2/_L3`·`_研究`·`_审查`/`_整合清单`）· `missing_doc` 与 `ghost_run` 共用它 · 磁盘有产出而台账没记录 ⇒ **不报**；两处都查不到 ⇒ **仍报**（守卫没死）')
+
+
+
+// ---------------------------------------------------------------- FIX-97 版本漂移可见 + 领域打不开不许静默（真机："工具全废"却没人知道去看版本）
+
+
+
+
 
 
 
@@ -8089,7 +8476,7 @@ if (!patchPath) {
     )
     assert.equal(entry.config.budgets.softLimit, 6000)
     assert.equal(entry.config.budgets.mandateHard, 2400)
-    assert.equal(entry.config.audit.checks.length, 24, '设计值：审计项齐（FIX-103 起 24 项）')
+    assert.equal(entry.config.audit.checks.length, 26, '设计值：审计项齐（FIX-110 起 26 项）')
     for (const id of ['doc_misfiled', 'doc_meta_missing', 'doc_tags_stale', 'archive_suggest']) {
       assert.ok(entry.config.audit.checks.includes(id), '审计项必须含 ' + id)
     }

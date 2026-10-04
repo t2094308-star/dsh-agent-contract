@@ -18,6 +18,49 @@ export const FIXED_SECTIONS = ['结论', '依据', '风险与待确认', '下一
 export const LIBRARIAN_KEYS = ['librarianTouchedAt', 'librarianChanges']
 
 /**
+ * **头部分析**喵（FIX-105）喵：这段 front-matter 是"真头"还是"只剩留痕的空壳"。
+ *
+ * 真机污染（2026-10-04）：读改写路径**无条件渲染 front-matter** ⇒ 全库积了 126+ 个
+ * 「内容键全 null、只剩两行留痕」的头（任务卡 23 张 + 仓库/docs 下 126 个），同族不一致、还被
+ * 台账当正式文档档检查 ⇒ 反复报莫名告警 ✗。判据（**唯一落点**，写侧与审计都读它）喵：
+ * 六个内容键（`FRONT_MATTER_KEYS`）**全空** ⇒ `allContentNull` 为真。
+ *
+ * @returns `{ hasHeader, rawHeader, meta, body, allContentNull }`：`rawHeader` 是**逐字**切片（可原样写回）喵。
+ */
+export function analyzeFrontMatter(text) {
+  const source = String(text ?? '')
+  const parsed = parseFrontMatter(source)
+  const hadHeader = parsed.meta !== null && !source.startsWith(parsed.body)
+  const rawHeader = hadHeader ? source.slice(0, source.length - parsed.body.length) : ''
+  const meta = parsed.meta || null
+  const allContentNull = Boolean(meta) && FRONT_MATTER_KEYS.every((key) => {
+    const value = meta[key]
+    if (value === null || value === undefined) return true
+    if (Array.isArray(value)) return value.length === 0
+    return String(value).trim() === '' || String(value).trim() === 'null'
+  })
+  /**
+   * **可清理判据改成白名单**喵（FIX-112，真机数据损失）喵 —— 允许被清的键**只有**这 6 个占位键
+   * （值全空）+ 留痕键（`librarianTouchedAt`/`librarianChanges`）；**出现任何别的键就一律不清**喵。
+   *
+   * 为什么必须白名单（真机教训）：黑名单把"只有 `archived: true` + `archivedAt`"的头也当成"全 null"⇒
+   * **整段删掉** ⇒ 归档语义丢失（那是**数据损失**，不是噪音）✗✗。
+   * 代价不对称：黑名单漏一个键 = 一次数据损失；白名单漏一个键只是"少清一篇" ⇒ 必须用白名单喵。
+   */
+  const placeholderKeys = new Set([...FRONT_MATTER_KEYS, ...LIBRARIAN_KEYS])
+  const nonPlaceholderKeys = Object.keys(meta || {}).filter((key) => !placeholderKeys.has(key))
+  return {
+    hasHeader: Boolean(rawHeader),
+    rawHeader,
+    meta,
+    body: hadHeader ? parsed.body : source,
+    allContentNull,
+    nonPlaceholderKeys,
+    strippable: allContentNull && nonPlaceholderKeys.length === 0,
+  }
+}
+
+/**
  * 长度策略喵（按字符数，忽略空白）喵。
  * - 三级文档：250~300 字是总纲的硬要求，超出只**强警告**（仍不拒写，与警告制一致）喵。
  * - 一级 / 二级：放开，只记 `oversize_doc`；一级沿用 DESIGN §5.4 的 3000 字口径喵。

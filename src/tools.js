@@ -14,6 +14,9 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { agentLabel } from './delegation/channels.js'
 // FIX-96 ②（用户约束）：**跑审计 + 重写快照**的**唯一实现** —— 本工具、启动自愈、面板「强制刷新」三处同源喵
 import { refreshPanel } from './panel/refresh.js'
+// FIX-109：审计新增条目的增量推送（与审计同源；状态是派生物）喵
+import { loadPushState, planPush, savePushState } from './audit/push.js'
+import { activeMemberNamed } from './delegation/channels.js'
 import { archiveDocs, autoBackfill, librarianSweep, mergeGlossary, patrol, refreshStaleTags } from './librarian/duties.js'
 import { classifyLength, countChars, parseFrontMatter, renderFrontMatter } from './ledger/docmeta.js'
 import { readFileIfPresent } from './ledger/fs.js'
@@ -193,6 +196,23 @@ function escalationSummary(store) {
   }
 }
 
+/**
+ * 推送状态摘要喵（FIX-109 ⑤）喵 —— 待推送 N / 已推送 M / 最近一条；读不到一律零值（绝不带塌体检）喵。
+ */
+async function pushSummary({ project }) {
+  try {
+    const state = await loadPushState({ project })
+    return {
+      pending: (state.pending || []).length,
+      pushed: state.pushed || 0,
+      lastPushAt: state.lastPushAt || null,
+      lastSummary: state.lastPushSummary || null,
+    }
+  } catch {
+    return { pending: 0, pushed: 0, lastPushAt: null, lastSummary: null }
+  }
+}
+
 function renderStatus(value) {
   const lines = []
   // FIX-11：先打版本与工具清单，核验方一眼就能比对「工作树 vs 运行中宿主」喵
@@ -225,6 +245,11 @@ function renderStatus(value) {
   lines.push(`审计项: ${(value.project.audit.checks || []).join(', ') || '(未配置)'}`)
   if (value.project.archiveDir) lines.push(`归档目录: ${value.project.archiveDir}`)
   // FIX-100 ②：**最近提权**（绕过契约的显式申请）要在体检里查得到喵
+  // FIX-109 ⑤：推送状态（待推送 / 已推送 / 最近一条）—— 默认开，关掉后在设置/配置里改喵
+  if (value.push) {
+    lines.push(`审计推送: 待推送 ${value.push.pending} 条 ｜ 已推送 ${value.push.pushed} 次`
+      + (value.push.lastPushAt ? ` ｜ 最近一条 ${value.push.lastPushAt}：${value.push.lastSummary || ''}` : ''))
+  }
   if (value.escalations) {
     const last = value.escalations.last
     lines.push(last
@@ -658,6 +683,8 @@ export function registerTools(ctx, pluginConfig, ledger, collected, projects, sh
         ...(ledgerSizes ? { ledger: ledgerSizes } : {}),
         // FIX-100 ②③：**最近提权**带上 —— 审计 / 面板 / 体检三处都要看得到「谁申请过绕过契约」喵
         escalations: escalationSummary(store),
+        // FIX-109 ⑤：推送状态可见（待推送 N / 已推送 M / 最近一条）喵
+        push: await pushSummary({ project }),
       }
     },
     presentCall() {
@@ -1290,6 +1317,20 @@ export function registerTools(ctx, pluginConfig, ledger, collected, projects, sh
           if (r.pitfall.backupPath) lines.push(`    旧版已备份：${r.pitfall.backupPath}`)
         }
         if (r.glossaryGaps.length) lines.push(`- 术语表缺口：${r.glossaryGaps.slice(0, 10).map((gap) => `${gap.word}(${gap.count})`).join('、')}`)
+        // FIX-105 ⑦ / FIX-106 ①：收尾两步（清"全 null 头" / 重建八类索引）必须在回执里看得见喵
+        if (r.stripNull) {
+          lines.push(`- 空头（只有占位键 + 留痕）：${r.stripNull.dryRun ? '将清' : '已清'} ${r.stripNull.files.length} 处`
+            + `；**跳过 ${(r.stripNull.skipped || []).length} 处**（含非占位键 —— 例如归档字段，清它会丢数据）`
+            + `${r.stripNull.failed && r.stripNull.failed.length ? `（失败 ${r.stripNull.failed.length}）` : ''}`)
+          for (const row of (r.stripNull.files || []).slice(0, 5)) lines.push(`    ${row.path}`)
+        }
+        if (r.indexes) {
+          const wrote = (r.indexes.files || []).filter((row) => row.wrote || row.wouldWrite)
+          lines.push(`- 类别索引：${r.indexes.dryRun ? '将重建' : '已重建'} ${wrote.length} 类`
+            + `${(r.indexes.files || []).length - wrote.length ? `（${(r.indexes.files || []).length - wrote.length} 类内容没变，未重写）` : ''}`)
+          for (const row of wrote) lines.push(`    ${row.kind} ${row.items} 条 → ${row.path}`)
+          for (const row of (r.indexes.failed || [])) lines.push(`- 索引写入失败 ${row.path}：${row.error}`)
+        }
         const failed = [
           ...(r.archive.failed || []), ...(r.naming.failed || []), ...(r.dedupe.failed || []),
           ...((r.tags && r.tags.writeFailures) || []),
@@ -1432,7 +1473,44 @@ export function registerTools(ctx, pluginConfig, ledger, collected, projects, sh
       // 一律走 `refreshPanel`（算审计 + 重写快照，顺带更新写入方版本标记），不许各写一套喵。
       // FIX-84/90：归档会话与父链这两个宿主侧事实也在那个实现里统一注入喵
       const { report } = await refreshPanel({ ctx, config: pluginConfig, store, project })
-      return report
+      /**
+       * FIX-109 ①-④：**审计一跑完就算增量并推送**（同一个入口，与面板/契约同源）喵 ——
+       * 有活跃常驻馆员且本会话就是它的父会话 ⇒ 一条**合并**消息直接送达；
+       * 送不到（没活跃实例 / 宿主拒绝 / 冷却中）⇒ 进**待推送池**（落盘、幂等），下次给它派单时自动带上喵。
+       */
+      let pushNote = ''
+      try {
+        const state = await loadPushState({ project })
+        const plan = planPush({
+          report,
+          state,
+          enabled: (pluginConfig && pluginConfig.audit ? pluginConfig.audit.pushIncrement : true) !== false,
+          cooldownMs: Number(pluginConfig && pluginConfig.audit ? pluginConfig.audit.cooldownMs : undefined) || undefined,
+          now: Date.now(),
+        })
+        let delivered = null
+        if (plan.push) {
+          const resident = activeMemberNamed(store, 'librarian')
+          const sender = exec && exec.agent
+          if (resident && resident.id && sender && typeof ctx.subagents.sendMessage === 'function') {
+            try {
+              await ctx.subagents.sendMessage(sender, resident.id, [{ type: 'text', text: plan.push.text }], { signal: exec.signal })
+              delivered = { to: resident.id, at: new Date().toISOString() }
+              pushNote = `已把 ${plan.push.items.length} 条新增审计条目推给常驻馆员（合并成一条）`
+            } catch (error) {
+              pushNote = `推送未送达（${(error && error.message) || error}）—— 已留在待推送池，下次派单自动带上`
+            }
+          } else if (!resident) {
+            pushNote = `没有活跃的常驻馆员 ⇒ ${plan.push.items.length} 条新增留在待推送池（下次派单自动带上）`
+          } else {
+            pushNote = `本次没有可由它投递的派单方 ⇒ ${plan.push.items.length} 条新增留在待推送池`
+          }
+        }
+        await savePushState({ project, state: { ...plan.state, lastDelivery: delivered } })
+      } catch (error) {
+        pushNote = `推送环节出错（不影响审计）：${(error && error.message) || error}`
+      }
+      return pushNote ? { ...report, pushNote } : report
     },
   }))
 

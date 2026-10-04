@@ -87,6 +87,10 @@ export const Config = Schema.object({
     checks: Schema.array(Schema.string()).default([]),
     // archive_suggest 的档龄阈值（天）：档龄超它且任务已结 → 只建议归档喵
     archiveAfterDays: Schema.number().default(90),
+    // FIX-109 ⑤：**审计新增条目的自动推送**（增量 → 推给能修的角色；默认开，可关）喵
+    pushIncrement: Schema.boolean().default(true),
+    // 推送冷却（毫秒）：同一批新增在这么短时间里不重复推（默认 5 分钟）喵
+    pushCooldownMs: Schema.number().default(300000),
   }),
   /**
    * git 集成喵（FIX-62 只提示 / FIX-67 可选提交）喵。

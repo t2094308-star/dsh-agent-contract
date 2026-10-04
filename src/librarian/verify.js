@@ -119,7 +119,7 @@ export function auditDiff({ before, after } = {}) {
 }
 
 /** 动作清单喵：把各步骤的结果拍平成"每条带路径与原因"的行喵。 */
-export function collectActions({ relocate, refRepair, archiveMark, caretFix, archive, dedupe, naming, tags, core, pitfall, plan, dryRun = false } = {}) {
+export function collectActions({ relocate, refRepair, archiveMark, caretFix, stripNull, bodyCaret, indexes, archive, dedupe, naming, tags, core, pitfall, plan, dryRun = false } = {}) {
   const rows = []
   const verb = (done, todo) => (dryRun ? todo : done)
   // FIX-69：类型归位 / 去归档前缀 / 临时文件搬离（每条带路径与原因）喵
@@ -146,6 +146,22 @@ export function collectActions({ relocate, refRepair, archiveMark, caretFix, arc
   for (const row of (plan && plan.overwrite) || []) rows.push({ kind: verb('覆盖', '将覆盖'), path: row.path, reason: `覆盖既有档（旧指纹 ${row.fingerprint || '(未知)'}）` })
   for (const row of (plan && plan.create) || []) rows.push({ kind: verb('新建', '将新建'), path: row.path, reason: '新建派生态' })
   for (const row of (plan && plan.rename) || []) rows.push({ kind: verb('改名', '将改名'), path: row.newPath || row.path, reason: `改名：${row.oldPath || ''} → ${row.newPath || ''}` })
+  // FIX-105 ⑦：清掉"全 null 头"也要进动作清单（每条带路径与原头摘要）喵
+  for (const row of (stripNull && stripNull.files) || []) {
+    rows.push({ kind: verb('清空头', '将清空头'), path: row.path, reason: `全 null 的 front-matter（${row.headerLines} 行）—— 只删那段头，正文一字不动；原头：${row.preview}` })
+  }
+  // FIX-110 ④：正文标题 ^ 的去前缀也进动作清单（每条带路径 + 行号 + 改前改后）喵
+  for (const row of (bodyCaret && bodyCaret.files) || []) {
+    rows.push({ kind: verb('去标题^', '将去标题^'), path: row.path, reason: `正文第 ${row.line} 行标题前缀：${row.before} → ${row.after}` })
+  }
+  // FIX-106 ①④：索引重建也进动作清单（每类一条：已写 / 将写 / 未变）喵
+  for (const row of (indexes && indexes.files) || []) {
+    rows.push({
+      kind: verb('索引', '将写索引'),
+      path: row.path,
+      reason: `${row.kind} 类别索引（${row.items} 条）${row.wrote ? '' : (row.wouldWrite ? '（内容有变，待写）' : '（内容没变，未重写）')}`,
+    })
+  }
   return rows
 }
 

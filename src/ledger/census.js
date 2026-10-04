@@ -100,7 +100,8 @@ export async function documentCensus({ project, read = readFile, readdirImpl = r
     if (!byKind[row.kind]) byKind[row.kind] = []
     byKind[row.kind].push(row)
   }
-  for (const list of Object.values(byKind)) list.sort((a, b) => String(a.path).localeCompare(String(b.path)))
+  // FIX-111 ③：排序必须**跨平台确定** —— `localeCompare` 受 locale/ICU 影响（WSL 与 Windows 可能给出不同行序）⇒ 索引逐字节不同 ✗
+  for (const list of Object.values(byKind)) list.sort((a, b) => { const x = String(a.path); const y = String(b.path); return x < y ? -1 : (x > y ? 1 : 0) })
   return {
     rows,
     byKind,

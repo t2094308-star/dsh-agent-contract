@@ -39,7 +39,9 @@ export function renderKindIndexBlock({ kind, rows = [], now = null }) {
     `## ${kind}索引（机器区块，由插件派生器生成 —— 只在本区块内增删）`,
     '',
     `- 字段：${KIND_INDEX_HEADERS[kind] || '路径 · 任务号 · 标题'}`,
-    `- 篇数：${rows.length}${now ? ` ｜ 生成时间：${now}` : ''}`,
+    // **刻意不写生成时间**：写进去就成了"每次都变"的内容 ⇒ 幂等失效、白写一遍（§9-28 的口径）✗
+    // 时间留在回执/返回里（`scannedAt` / `files[].wrote`）就够喵
+    `- 篇数：${rows.length}`,
     '',
   ]
   if (!rows.length) lines.push('- （空）')
@@ -74,27 +76,50 @@ export async function writeKindIndexes({ project, census, dryRun = false, now = 
     const path = joinUnderRoot(dir, KIND_INDEX_FILE)
     const block = renderKindIndexBlock({ kind, rows, now })
     let existing = ''
+    // FIX-106 诊断（用户点名）：把"读失败被吞成空串"这件事**记下来** —— 否则它一眼看去与"文件不存在"一样，
+    // 于是"读失败 ⇒ existing='' ⇒ 必然重写"就成了永远查不出来的假重写 ✗ 喵
+    let readFailed = null
     try {
       existing = String(await read(path, 'utf8'))
-    } catch {
+    } catch (error) {
       existing = ''
+      readFailed = String((error && error.message) || error)
+    }
+    /**
+     * FIX-111 诊断：定位"哪一次写入把目录前缀多拼了一遍"喵。
+     * **纪律**：探针整体包 try/catch ⇒ 探针自己出错**只打一行 warning、绝不崩套件**；
+     * 而且必须放在 `existing` 读出来**之后**（放前面会 TDZ，套件直接崩在 OK 45 —— 上一版就是这么错的）喵。
+     */
+    if (process.env.F106_WHO) {
+      try {
+        const t3 = rows.find((row) => String(row.path || '').includes('T-3_又污染'))
+        const short = new Error().stack.split('\n').slice(1, 4).map((line) => (line.trim().split(' ')[1] || '?')).join('<')
+        console.log('[WHO] ' + short + ' kind=' + kind + ' rows=' + rows.length
+          + ' row0=' + JSON.stringify(rows[0] ? rows[0].path : null)
+          + ' t3=' + JSON.stringify(t3 ? t3.path : null)
+          + ' existingLen=' + existing.length)
+      } catch (error) {
+        console.warn('[WHO] 探针自己出错（已忽略，不影响套件）：' + ((error && error.message) || error))
+      }
     }
     const merged = mergeKindIndexBlock(existing, block)
+    // FIX-106 诊断：**首次创建**（原文件不存在）与"内容变化的重写"是两回事 —— 分开记，别混成一个 wrote 喵
+    const firstCreate = existing === ''
     const wrote = merged !== existing
     if (!wrote) {
-      files.push({ kind, path, items: rows.length, wrote: false })
+      files.push({ kind, path, items: rows.length, wrote: false, readFailed, firstCreate, existingLen: existing.length, mergedLen: merged.length, previousText: existing })
       continue
     }
     if (dryRun) {
-      files.push({ kind, path, items: rows.length, wrote: false, wouldWrite: true })
+      files.push({ kind, path, items: rows.length, wrote: false, wouldWrite: true, readFailed, firstCreate, existingLen: existing.length, mergedLen: merged.length })
       continue
     }
     try {
       await mkdir(dir, { recursive: true })
       await write(path, merged, 'utf8')
-      files.push({ kind, path, items: rows.length, wrote: true })
+      files.push({ kind, path, items: rows.length, wrote: true, readFailed, firstCreate, existingLen: existing.length, mergedLen: merged.length, previousText: existing, writtenText: merged })
     } catch (error) {
-      failed.push({ kind, path, error: String((error && error.message) || error) })
+      failed.push({ kind, path, error: String((error && error.message) || error), readFailed, firstCreate })
     }
   }
   return { files, failed }

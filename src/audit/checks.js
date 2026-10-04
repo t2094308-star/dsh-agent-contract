@@ -6,7 +6,7 @@
  * 唯一的例外是**配置错误**：未知的 `audit.checks` 项必须当场报错，否则"配置写错却以为在查"喵。
  */
 import { existsSync } from 'node:fs'
-import { classifyLength, countChars, parseFrontMatter } from '../ledger/docmeta.js'
+import { analyzeFrontMatter, classifyLength, countChars, parseFrontMatter } from '../ledger/docmeta.js'
 import { listMarkdown, listMarkdownDeep, readFileIfPresent } from '../ledger/fs.js'
 import { readFile, readdir } from 'node:fs/promises'
 import { basename } from 'node:path'
@@ -63,6 +63,10 @@ export const CHECK_LEVELS = {
   uncontracted_dispatch: 'yellow',
   // FIX-103 ④：类别非空但缺索引 / 索引与磁盘不符 ⇒ 黄（建议跑一轮索引重建）喵
   missing_kind_index: 'yellow',
+  // FIX-105 ⑥：有头但内容键全空的"全 null 头"（真机积了 126+ 处）⇒ 黄，建议清掉（留痕归台账）喵
+  null_frontmatter: 'yellow',
+  // FIX-110 ④：**正文标题行**以 ^ 开头（真机 39 篇）⇒ 黄，跑一轮治理去前缀喵
+  body_caret_title: 'yellow',
   missing_progressive_link: 'yellow',
   dirty_related_path: 'yellow',
 }
@@ -257,9 +261,10 @@ async function checkMissingDoc({ store, project }) {
     const taskId = taskIdOfMember(member.name)
     const found = taskId ? tiers.get(taskId) : null
     if (found && found.size > 0) continue
-    // 声明了 `research` / `report` 的角色：交过**研究档 / 报告档**也算过（三档不是唯一合法形态）喵
-    const hasKindDoc = taskId ? await hasKindDocForTask({ store, project, taskId, kinds }) : false
-    if (hasKindDoc) continue
+    // FIX-107 ①：统一判据（台账 + **扫全部类别目录** + 按形态认）—— 三档不是唯一合法形态，
+    // 研究档 / 报告档这些**不进台账**的类别也得认出来（只查台账会把"交过"判成"没交"）✗ 喵
+    const hasAny = await hasAnyDeliverable({ store, project, taskId, role: member.role, kinds })
+    if (hasAny) continue
     items.push({
       target: member.name,
       detail: `成员已 ${member.status}，但任务 ${taskId || '(未知)'} 没有任何它该交的产出`
@@ -270,29 +275,70 @@ async function checkMissingDoc({ store, project }) {
 }
 
 /**
- * 该任务下有没有"研究档 / 报告档"这类**非三档**的合法产出喵。
+ * **该任务到底有没有产出**喵（FIX-107）喵 —— `missing_doc` 与 `ghost_run` **共用**这一个判据喵。
  *
- * ⚠ **要扫磁盘**，不能只看台账 —— 台账只含产出档 / 任务 / 进度，研究/审查/整合清单这些类别的档
- * **不进台账**（真机口径），只查台账会把"交过研究档"误判成"没交" ✗ 喵。
+ * 为什么不能只看 `latestDeliverable` / 只看台账：台账只含产出档 / 任务 / 进度（真机口径），
+ * 研究 / 审查 / 整合清单 / 坑 / 修改 / 核心数据库这些**不进台账** ⇒ 只查台账会把"交过研究档"误判成"没交" ✗。
+ *
+ * 判据（三路并查，任一命中即算有产出）喵：
+ * ① **角色产出形态豁免**：`bookkeeping`（簿记类）**没有文档产出义务** ⇒ 直接算过；
+ * ② **台账**：该 `taskId` 下的文档记录（三档 `tier 1~3`、研究档、报告档按形态认）；
+ * ③ **磁盘**：扫**全部类别目录**，按 `<taskId>_` 前缀 + 形态后缀认（`_L1/_L2/_L3` · `_研究` · `_审查` / `_整合清单`）；
+ *    `latestDeliverable` 只是**其中一条**线索，不是唯一依据喵。
+ *
+ * @returns `true` = 有产出（不该报）；`false` = 三路都查不到（该报）喵。
  */
-async function hasKindDocForTask({ store, project, taskId, kinds }) {
-  const wanted = []
-  if (kinds.includes('research')) wanted.push('_研究')
-  if (kinds.includes('report')) wanted.push('_审查', '_整合清单')
-  if (!wanted.length) return false
-  const looksLike = (name) => wanted.some((suffix) => String(name).includes(suffix))
-  for (const doc of store.listDocs()) {
-    if (doc.taskId !== taskId || !doc.path) continue
-    const name = String(doc.path).replace(/\\/g, '/').split('/').pop() || ''
-    if (looksLike(name)) return true
+export async function hasAnyDeliverable({ store = null, project = null, taskId = null, role = null, kinds = null } = {}) {
+  const forms = Array.isArray(kinds) ? kinds : (role ? deliverableKindsOf(role) : [])
+  // ① 簿记类：它的完成判据是**留痕**，不是交档（FIX-85 口径）—— 豁免喵
+  if (forms.includes('bookkeeping')) return true
+  const id = String(taskId || '').trim()
+  if (!id) return false
+  const wantThreeTier = !forms.length || forms.includes('three-tier')
+  const wantResearch = forms.includes('research')
+  const wantReport = forms.includes('report')
+  const nameMatches = (base) => {
+    const name = String(base || '')
+    if (!name.startsWith(`${id}_`)) return false
+    if (!forms.length) return true
+    if (wantThreeTier && /_L[123]\.md$/i.test(name)) return true
+    if (wantResearch && name.includes('_研究')) return true
+    if (wantReport && (name.includes('_审查') || name.includes('_整合清单'))) return true
+    return false
   }
-  for (const dir of (project && project.docsDirs) || []) {
-    for (const name of await listMarkdownDeep(dir)) {
+  // ② 台账（含 `latestDeliverable` 这一条线索）
+  const docs = store && typeof store.listDocs === 'function' ? store.listDocs() : []
+  const own = docs.filter((doc) => doc && String(doc.taskId || '') === id)
+  if (own.some((doc) => Number(doc.tier) >= 1 && Number(doc.tier) <= 3)) return true
+  if (own.some((doc) => nameMatches(String(doc.path || '').replace(/\\/g, '/').split('/').pop()))) return true
+  const members = store && typeof store.listMembers === 'function' ? store.listMembers() : []
+  if (members.some((member) => member && member.latestDeliverable && String(member.latestDeliverable).includes(id))) return true
+  // ③ 磁盘：**全部类别目录**（不只 docsDirs —— 类别按 docKinds 认，产出根也要算）喵
+  const dirs = [
+    ...Object.values((project && project.docKinds) || {}),
+    ...((project && project.docsDirs) || []),
+    project && project.deliverablesDir,
+  ].filter(Boolean)
+  for (const dir of [...new Set(dirs)]) {
+    let names = []
+    try {
+      names = await listMarkdownDeep(dir)
+    } catch {
+      continue
+    }
+    for (const name of names) {
       const base = String(name).replace(/\\/g, '/').split('/').pop() || ''
-      if (base.startsWith(`${taskId}_`) && looksLike(base)) return true
+      if (nameMatches(base)) return true
     }
   }
   return false
+}
+
+/**
+ * 该任务下有没有"研究档 / 报告档"这类**非三档**的合法产出喵（保留旧入口，内部走统一判据）喵。
+ */
+async function hasKindDocForTask({ store, project, taskId, kinds }) {
+  return hasAnyDeliverable({ store, project, taskId, kinds })
 }
 
 /** ② over_budget：文档超长（三级强警告 / 二一级 oversize）或契约片段超预算喵。 */
@@ -410,17 +456,27 @@ function checkCrossVendor({ store }) {
 }
 
 /** ⑥ ghost_run：one-shot 节点跑完却没有落档喵。 */
-function checkGhostRun({ store }) {
+async function checkGhostRun({ store, project }) {
   const items = []
   for (const member of store.listMembers()) {
     // FIX-84 ②：**用户归档掉的会话 = 明确说这些不用管了** ⇒ 相关检查一律跳过（与警告制精神一致）喵
     if (isArchivedMember(member, arguments[0] && arguments[0].archivedSessionIds, store.listMembers(), arguments[0] && arguments[0].parentOf)) continue
     if (member.mode !== 'one-shot') continue
     if (member.status !== 'completed' && member.status !== 'released') continue
-    if (member.latestDeliverable) continue
-    // FIX-85 ④：**簿记类**角色（馆员）本就不产出三档 ⇒ 不得拿"没落档"判它（真机 ghost_run 11 条里多条是它）喵
-    if (isBookkeepingRole(member.role)) continue
-    items.push({ target: member.name, detail: '一次性节点已结束但没有落档（跑完即释放，产出已不可追）' })
+    const taskId = taskIdOfMember(member.name)
+    /**
+     * FIX-107 ②：**不许再拿 `latestDeliverable` 当"没落档"的唯一依据**喵 ——
+     * 统一判据 `hasAnyDeliverable()`：① 簿记类豁免 ② 台账（含 latestDeliverable 这条线索）
+     * ③ **扫磁盘全部类别目录**（研究档 / 报告档这些**不进台账**的类别也能认出来）喵。
+     */
+    const has = await hasAnyDeliverable({
+      store, project, taskId, role: member.role,
+    })
+    if (has) continue
+    items.push({
+      target: member.name,
+      detail: `一次性节点已结束但没有落档（跑完即释放，产出已不可追；已查：台账 + 各类别目录${taskId ? `，任务 ${taskId}` : '（任务号判不出）'}）`,
+    })
   }
   return items
 }
@@ -550,6 +606,8 @@ export const CHECK_IMPLEMENTATIONS = {
   legacy_caret: checkLegacyCaret,
   uncontracted_dispatch: checkUncontractedDispatch,
   missing_kind_index: checkMissingKindIndex,
+  null_frontmatter: checkNullFrontmatter,
+  body_caret_title: checkBodyCaretTitle,
   legacy_archive_pending: checkLegacyArchivePending,
   bookkeeping_untraced: checkBookkeepingUntraced,
   missing_progressive_link: checkMissingProgressiveLink,
@@ -699,6 +757,61 @@ async function checkMissingKindIndex({ project, read = readFile, census = null }
 }
 
 /**
+ * **`null_frontmatter`**：有 front-matter 但**内容键全空**（只剩留痕）⇒ 黄喵（FIX-105 ⑥）喵。
+ *
+ * 为什么要有这条：真机上这种"全 null 头"积到 **126+ 处**却长期没人发现 —— 写侧修好之后，
+ * 存量得**看得见**才清得掉；清掉之后再跑一轮治理**不许再产生**（写侧已有断言守着）喵。
+ * 建议：用 `librarian_sweep`（收尾会自动清，dryRun 先给"将清 N 处"）喵。
+ */
+async function checkNullFrontmatter({ project, read = readFile }) {
+  const rows = []
+  const dirs = [
+    ...Object.values((project && project.docKinds) || {}),
+    project && project.tasksDir,
+    project && project.progressDir,
+  ].filter(Boolean)
+  for (const dir of dirs) {
+    let names = []
+    try {
+      names = await listMarkdownDeep(dir)
+    } catch {
+      continue
+    }
+    for (const name of names) {
+      const path = joinUnderRoot(dir, name)
+      try {
+        const text = await read(path, 'utf8')
+        const info = analyzeFrontMatter(String(text))
+        const base = String(path).split(/[\\/]/).pop() || ''
+        // FIX-110 ②：**索引类文件不该有 front-matter** —— 它是派生物，带头只会误导阅读与工具喵
+        if (info.hasHeader && (base === '索引.md' || base === 'README.md' || base === '派生态索引.md')) {
+          rows.push({
+            target: path,
+            detail: '**派生物索引**却有 front-matter（索引内容由生成器负责，不该带头）—— 建议清掉那段头（留痕归台账）喵',
+            level: CHECK_LEVELS.null_frontmatter,
+          })
+          continue
+        }
+        // FIX-110 ③ 的口径（**刻意不做成审计项**）：真机坑类 11 篇"主题名"老档是"既没头也没 legacy 标记"的中间态，
+        // 但它与 FIX-105 的清理结果**形态完全相同**（清掉全 null 头之后也是"无头"）⇒ 做成审计项会变成永动机：
+        // 清完头就报"无头"，催馆员补头，补出空头又被清 ✗✗。
+        // 所以口径定为：**无头类别档 = 存量旧档，走 legacy 豁免**（不报），要补头由 `ledger_backfill --auto` 显式发起喵。
+        if (info.hasHeader && info.strippable) {
+          rows.push({
+            target: path,
+            detail: `有 front-matter 但**内容键全空**（只剩留痕）—— 这种头毫无意义，还让台账把它当正式文档档看`,
+            level: CHECK_LEVELS.null_frontmatter,
+          })
+        }
+      } catch {
+        /* 单篇读不到就跳过喵 */
+      }
+    }
+  }
+  return rows
+}
+
+/**
  * 读任务目录下所有作业登记卡喵（读不到就跳过那一张，绝不让审计整体失败）喵。
  * @returns `[{ taskId, status, occupancies }]`（占用路径已归一化为绝对路径）喵。
  */
@@ -833,11 +946,75 @@ async function checkStrayNonMd({ project, readdirImpl }) {
 /** ⑱ legacy_caret：文件名仍带 `^` 前缀（归档语义该进元数据 `archived: true`）（FIX-69）喵。 */
 async function checkLegacyCaret({ project, readdirImpl }) {
   const rows = await scanDocAreas({ project, readdirImpl })
-  return rows.filter((row) => row.name.startsWith('^')).map((row) => ({
+  const items = rows.filter((row) => row.name.startsWith('^')).map((row) => ({
     target: row.path,
     detail: '文件名还带 `^` 前缀（旧的"归档"写法）—— 归档语义已改为 front-matter 的 `archived: true`；'
       + '让图书管理员跑一轮治理会自动去前缀 + 写元数据（只改名、不改正文）喵',
   }))
+  // FIX-110 ①：**归档区也要覆盖** —— 原来只扫类别目录（`scanDocAreas` 刻意不扫 archive）⇒
+  // 真机 `archive/2026-10/^T16…`、`^T17…` 两处一直没被报出来 ✗（要么纳入、要么显式豁免，不许静默漏）
+  const archiveDir = project && project.archiveDir ? String(project.archiveDir) : null
+  if (archiveDir) {
+    for (const name of await listMarkdownDeep(archiveDir)) {
+      const base = String(name).replace(/\\/g, '/').split('/').pop() || ''
+      if (!base.startsWith('^')) continue
+      items.push({
+        target: joinUnderRoot(archiveDir, name),
+        detail: '**归档区**里的文件名还带 `^` 前缀 —— 归档语义在 `archived: true`，文件名不该再带前缀；'
+          + '让图书管理员跑一轮治理处理（只改名、不改正文）喵',
+      })
+    }
+  }
+  return items
+}
+
+/**
+ * **`body_caret_title`**：**正文标题行**以 `^` 开头喵（FIX-110 ④，真机 39 篇）喵。
+ *
+ * 归档前缀被写进正文标题（`## ^T16 …`）—— 归档语义早已在头部 `archived: true`，正文里的 `^` 是历史噪音喵。
+ * 报**路径 + 行号 + 标题摘要**，建议跑一轮治理（`librarian_sweep` 的存量清理会去掉它，可预演 + 幂等）喵。
+ */
+async function checkBodyCaretTitle({ project, store = null, read = readFile, readdirImpl = readdir }) {
+  const items = []
+  // 自己扫（不 import 馆员模块 —— `duties.js` 静态 import 本模块，动态 import 会成环 ⇒ 探针静默失败过）喵
+  const dirs = [
+    ...Object.values((project && project.docKinds) || {}),
+    ...((project && project.docsDirs) || []),
+    project && project.deliverablesDir,
+    project && project.tasksDir,
+  ].filter(Boolean)
+  for (const dir of [...new Set(dirs)]) {
+    let names = []
+    try {
+      names = await listMarkdownDeep(dir, '')
+    } catch {
+      continue
+    }
+    for (const name of names) {
+      const path = joinUnderRoot(dir, name)
+      const base = String(name).replace(/\\/g, '/').split('/').pop() || ''
+      // 派生物索引不进这条检查（它们的正文由生成器负责）喵
+      if (base === '索引.md' || base === '派生态索引.md') continue
+      let text = ''
+      try {
+        text = String(await read(path, 'utf8'))
+      } catch {
+        continue
+      }
+      const info = analyzeFrontMatter(text)
+      const body = info.hasHeader ? info.body : text
+      const lines = body.split('\n')
+      for (let i = 0; i < lines.length; i += 1) {
+        if (!/^#{1,6}\s*\^\s*\S/.test(lines[i])) continue
+        items.push({
+          target: `${path}:${i + 1}`,
+          detail: `正文**标题行**以 \`^\` 开头（${String(lines[i]).trim().slice(0, 40)}）—— 归档语义在头部 \`archived: true\`，`
+            + '标题里的 `^` 是历史遗留；跑一轮治理会只去掉那个前缀（该行其余一字不动）喵',
+        })
+      }
+    }
+  }
+  return items
 }
 
 /**

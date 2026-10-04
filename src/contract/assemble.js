@@ -272,10 +272,10 @@ function renderCapabilitySegment(role, routeNote, oneShot = false) {
     `- 角色：${role.title}（${role.id}）`,
     // FIX-78 ③：把"**本次被怎么派**"写进契约 —— 子代理自己也该知道自己是一次性还是常驻喵
     `- 运行模式：${oneShot
-      ? '前台（**本次为一次性**：跑完即释放，之后不能再派活）'
+      ? '前台（**本次为一次性**：跑完即释放，不能再派活）'
       : (role.mode === 'continuable'
         ? (role.singleton === true ? '后台（**常驻单例**：服务所有任务，可续派 / 可唤醒）' : '后台（常驻：可续派 / 可唤醒）')
-        : '前台（跑完即释放，完成后不可再派活）')}`,
+        : '前台（跑完即释放，不可再派活）')}`,
     `- 工具白名单：${role.tools && role.tools.length ? role.tools.join('、') : '(不限制)'}`,
     `- 模型路由：${role.modelRoute || 'default'}${routeNote}`,
     '',
@@ -365,7 +365,7 @@ export function renderContinuationSlice({
 /**
  * 把一次委派装配成完整契约喵（DESIGN §5.2）喵。
  */
-export async function buildContract({ config, roleId, task, parent, layer, totalAgents, project, oneShot = false, globalFilesText = '' }) {
+export async function buildContract({ config, roleId, task, parent, layer, totalAgents, project, oneShot = false, globalFilesText = '', auditDigest = null }) {
   const projectView = project || resolveProject(config)
   const role = getRole(config, roleId)
   const taskId = String((task && task.id) || '').trim()
@@ -452,6 +452,14 @@ export async function buildContract({ config, roleId, task, parent, layer, total
       soft: Number.MAX_SAFE_INTEGER,
       hard: Number.MAX_SAFE_INTEGER,
     },
+    // FIX-108 ③：**审计摘要进契约**（与 `audit_scan` / 面板同一份实现产出）——
+    // 馆员看全量"这些是你要收拾的"，其它角色只带与本任务相关的条目（避免噪音）喵
+    ...(auditDigest && auditDigest.text ? [{
+      id: 'audit',
+      text: auditDigest.text,
+      soft: Number.MAX_SAFE_INTEGER,
+      hard: Number.MAX_SAFE_INTEGER,
+    }] : []),
     { id: 'slices', text: sliceText, ...SEGMENT_LIMITS.slices },
     // FIX-75：能力配置同样是插件生成的固定条文 ⇒ 不设上限喵
     { id: 'capability', text: renderCapabilitySegment(role, routeNoteFor(config, role), oneShot), soft: Number.MAX_SAFE_INTEGER, hard: Number.MAX_SAFE_INTEGER },

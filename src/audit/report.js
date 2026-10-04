@@ -39,6 +39,8 @@ export const SUGGESTIONS = {
   missing_progressive_link: '用 `doc_emit` 重发该档（会自动写指针），或让馆员跑一轮治理统一补',
   dirty_related_path: '需人工处理（当前无自动清洗机制）：把 relatedFiles 改成可解析的绝对路径（doc_emit 的 relatedFiles 参数）',
   // FIX-100 ①：绕过契约的派单 —— 两条路：走契约，或**先提权**（提权后标「已提权」、不再报黄）喵
+  body_caret_title: '跑一轮治理（`librarian_sweep` 的存量清理会**只**去掉标题行开头的 `^`，该行其余一字不动；dryRun 先给"将改 N 处"）',
+  null_frontmatter: '用 `librarian_sweep` 一轮治理清掉（收尾会自动清，dryRun 先给"将清 N 处"；**只删那段头，正文一字不动**，留痕仍在台账）',
   missing_kind_index: '跑一轮索引重建（让图书管理员跑 `librarian_indexes` 即可；机器区块由派生器生成，零模型调用）',
   uncontracted_dispatch: '后续请走契约派单（`contract_delegate_*`）；**确需绕过**（契约工具不可用 / 宿主限制）'
     + '就先调 `contract_request_escalation` 说明理由，再用普通派单 —— 提权后本项会标「已提权」且不计红黄',

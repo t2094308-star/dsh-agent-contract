@@ -124,7 +124,7 @@ export const BUILTIN_ROLES = [
     title: '研究员',
     mode: 'one-shot',
     modelRoute: 'default',
-    tools: withDeliverableTools(['read', 'glob', 'grep', 'write', 'todo_write']),
+    tools: withDeliverableTools(['read', 'glob', 'grep', 'write', 'todo_write', 'doc_search']),
     budgetChars: 800,
     deliverable: '结束前必须产出研究档：把结论写成 .md 落到产出目录（见状态槽的「位置」取值），并把绝对路径回贴给上级喵。',
     forbidden: '禁止修改任何既有源码或文档；只允许新建自己的产出档喵。',
@@ -140,7 +140,7 @@ export const BUILTIN_ROLES = [
     title: '实现者',
     mode: 'continuable',
     modelRoute: 'default',
-    tools: withDeliverableTools(['read', 'write', 'edit', 'glob', 'grep', 'bash', 'pwsh', 'todo_write']),
+    tools: withDeliverableTools(['read', 'write', 'edit', 'glob', 'grep', 'bash', 'pwsh', 'todo_write', 'doc_search']),
     budgetChars: 800,
     deliverable: '按任务范围实现改动并自测；结束前把改动清单与验证结果回贴给上级喵。',
     forbidden: '禁止改动任务范围之外的文件；禁止覆盖共享文件（共享文件只归主代理写），需要时只新建独立文件并回报喵。',
@@ -156,7 +156,7 @@ export const BUILTIN_ROLES = [
     title: '审查者',
     mode: 'continuable',
     modelRoute: 'default',
-    tools: withDeliverableTools(['read', 'glob', 'grep']),
+    tools: withDeliverableTools(['read', 'glob', 'grep', 'doc_search']),
     budgetChars: 800,
     deliverable: '输出审查意见：按严重度排序的问题清单，每条给出文件路径、复现条件与建议改法喵。',
     forbidden: '只读既有代码与文档，禁止修改任何**既有**文件；只允许用 doc_emit / progress_upsert 新建自己的产出档；发现问题只回报，不动手修喵。',
@@ -174,7 +174,7 @@ export const BUILTIN_ROLES = [
     modelRoute: 'adversary',
     // 只读 + 检索：`session_search` 在本机**没有任何 bundle 挂载**（只有 session-query-sqlite 服务），
     // 写进白名单会让 restrict() 硬失败，所以删掉；L4 跨会话检索仍写在契约的检索阶梯里作纪律喵
-    tools: withDeliverableTools(['read', 'glob', 'grep']),
+    tools: withDeliverableTools(['read', 'glob', 'grep', 'doc_search']),
     budgetChars: 800,
     deliverable: '输出对抗结论：尝试证伪的假设、失败的反例、以及实现者与审查者都漏掉的风险喵。',
     forbidden: '只读既有代码与文档，禁止修改任何**既有**文件；只允许用 doc_emit / progress_upsert 新建自己的产出档；禁止复述审查者已有的意见充当新发现喵。',
@@ -203,6 +203,11 @@ export const BUILTIN_ROLES = [
       'librarian_relocate',
       // FIX-103：各类别索引重建（机器区块由派生器生成，零模型调用）喵
       'librarian_indexes',
+      // FIX-108 ①：馆员要"看得见审计才能照审计干活" ⇒ 白名单补上 audit_scan；
+      // doc_census 是 FIX-102 点名要用的工具（角色卡里写了却没给，纪律成摆设）⇒ 一起补喵
+      'audit_scan', 'doc_census',
+      // FIX-108 ①：检索阶梯点名了它 ⇒ 白名单必须有（扫描式断言的战果）喵
+      'doc_search',
       // FIX-74：馆员的簿记核心工具 —— 真机实证：缺它 ⇒ 补充指令里"先 ledger_rebuild"那一步**断链**
       // （子代理回报"不在我的工具白名单，第一步未执行"）喵
       'ledger_rebuild',

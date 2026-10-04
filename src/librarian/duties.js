@@ -12,7 +12,10 @@
 import { existsSync } from 'node:fs'
 import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, relative } from 'node:path'
-import { FIXED_SECTIONS, countChars, parseFrontMatter, renderFrontMatter } from '../ledger/docmeta.js'
+import { FIXED_SECTIONS, analyzeFrontMatter, countChars, parseFrontMatter, renderFrontMatter } from '../ledger/docmeta.js'
+// FIX-106：sweep 收尾要顺手重建八类索引（与 librarian_indexes **同一实现**）喵
+import { writeKindIndexes } from './indexes.js'
+import { documentCensus } from '../ledger/census.js'
 import { deriveFromFile, expandKeywords, extractPaths, glossaryPath, isGenericKeyword, loadGlossary, scanNeedsLibrarian, sectionContent } from '../ledger/derive.js'
 import { baseNameOf, listMarkdown, readFileIfPresent, listMarkdownDeep } from '../ledger/fs.js'
 // FIX-69：类型归位 / `^` 前缀搬元数据 / 临时文件搬离（`scanDocAreas` 与检查项共用同一份扫描）喵
@@ -116,8 +119,15 @@ export function coreIndexPath(project) {
 }
 
 /** 坑库 README 索引路径喵（FIX-22 的预演清单里要能列到它）喵。 */
+/**
+ * 坑库索引的落点喵（FIX-106 回归：**没配「坑」类别就别写**）喵。
+ *
+ * 原来的兜底是 `docsDirs[0]` —— 真机复现时它把「坑库索引」写进了 **研究/** 目录 ✗：
+ * 那个文件每轮都被当"研究类的一篇档"索引进去，而它自己带时间戳（`最后更新`）⇒ **一轮一个样** ⇒
+ * 类别索引跟着变 ⇒ 幂等断言红 ✗✗。没配坑类别 ⇒ 返回 null，调用方跳过（不静默：回执里记 skipped）喵。
+ */
 export function pitfallIndexPath(project) {
-  const dir = (project.docKinds && project.docKinds['坑']) || (project.docsDirs && project.docsDirs[0])
+  const dir = project && project.docKinds ? project.docKinds['坑'] : null
   return dir ? joinUnderRoot(dir, 'README.md') : null
 }
 
@@ -917,16 +927,33 @@ async function countReferences({ store, oldPaths = [] } = {}) {
  * 那是单独决策）⇒ 只扫台账会漏掉一大半引用方 ✗ —— 真机那句错表述就在 `任务/` 里喵。
  * @returns `[{ path, text, meta, body }]`（按路径去重）喵。
  */
+/**
+ * 该路径是不是**派生物索引**喵（FIX-111）喵 —— 类别索引 / 派生态索引 / 坑库索引喵。
+ *
+ * 为什么必须把它们从"读改写扫描"里排除（真机 WSL 复现的根因）喵：
+ * 索引文件也是 `.md`、也在 `docsDirs` 里 ⇒ 引用修复/搬移会把它当**普通档**扫到并"修引用"，
+ * 于是它里面的行被改成 `<dir>/<绝对路径>`（多拼一个目录前缀）⇒ 与索引生成器**每轮互相打架**：
+ * 生成器写干净的、引用修复又给改脏 ✗✗（幂等断言因此红，且只在 POSIX 上稳定复现）。
+ * **派生物的内容由生成器负责**，读改写路径一律绕开它们喵。
+ */
+export function isDerivedIndexPath(path) {
+  const base = String(path || '').replace(/\\/g, '/').split('/').pop() || ''
+  return base === '索引.md' || base === '派生态索引.md' || base === CORE_INDEX_FILE
+}
+
 async function scanAllDocs({ project, store } = {}) {
   const rows = new Map()
   const push = async (path) => {
     if (!path || rows.has(path)) return
+    // FIX-111：**派生物索引不进读改写面**（否则引用修复会把索引的行改脏，与生成器互相打架）喵
+    if (isDerivedIndexPath(path)) return
     const file = await readFileIfPresent(path)
     if (!file) return
     const parsed = parseFrontMatter(file.text)
     rows.set(path, { path, text: file.text, meta: parsed.meta || {}, body: parsed.meta === null ? file.text : parsed.body })
   }
-  for (const doc of store.listDocs()) await push(doc.path)
+  // FIX-106：拿不到台账（store 为空）也照样扫磁盘 —— 清"全 null 头"这类活**只需要磁盘**喵
+  for (const doc of (store && typeof store.listDocs === 'function' ? store.listDocs() : [])) await push(doc.path)
   for (const dir of [...(project.docsDirs || []), project.tasksDir, project.deliverablesDir]) {
     if (!dir) continue
     for (const name of await listMarkdownDeep(dir)) await push(joinUnderRoot(dir, name))
@@ -1286,8 +1313,10 @@ export async function rebuildCoreDatabase({ project, store, report, nowIso = new
  * `mergeIndexBlock()` 只在标记区块内增删，区块外一字不动；写前按 §9-26 备份喵。
  */
 export async function rebuildPitfallIndex({ project, store, nowIso = new Date().toISOString(), dryRun = false }) {
-  const dir = (project.docKinds && project.docKinds['坑']) || (project.docsDirs && project.docsDirs[0])
-  if (!dir) return { path: null, entries: 0, added: 0, removed: 0, removedLines: [], changed: false, wrote: false }
+  // FIX-106 回归：**只写「坑」类别自己的目录**（没配就跳过）—— 兜底到 `docsDirs[0]` 会把一个带时间戳的
+  // 索引写进**别的类别目录**（真机里是 研究/），于是那一类的索引一轮一个样、幂等断言红 ✗ 喵
+  const dir = project && project.docKinds ? project.docKinds['坑'] : null
+  if (!dir) return { path: null, entries: 0, added: 0, removed: 0, removedLines: [], changed: false, wrote: false, error: null, skipped: '未配置「坑」类别目录' }
   const path = pitfallIndexPath(project)
   const rows = []
   for (const name of await listMarkdown(dir)) {
@@ -1295,14 +1324,17 @@ export async function rebuildPitfallIndex({ project, store, nowIso = new Date().
     const file = await readFileIfPresent(joinUnderRoot(dir, name))
     const known = store.listDocs().find((doc) => doc.path === joinUnderRoot(dir, name))
     const title = known && known.title ? ` — ${known.title}` : ''
-    const stamp = file ? ` · 更新 ${new Date(file.mtime).toISOString()}` : ''
-    rows.push(`- [${name}](${name})${title}${stamp}`)
+    // FIX-106 ①：机器区块里**不许有随运行变化的东西** —— 原来这里带 ` · 更新 <mtime>`：
+    // 任何一次触碰都会让它变 ⇒ 索引跟着重写（时间/更新时间这类信息看回执与 `doc_census`）✗ 喵
+    rows.push(`- [${name}](${name})${title}`)
   }
   const blockLines = [
     `# 坑库索引（${dir}）`,
     '',
     '> **派生物·可重建**：由图书管理员维护，**只在下面的标记区块内增删**；'
       + '区块之外的人工内容（任务类型表 / 使用规则等）不受影响喵。',
+    // 保留 `最后更新`（FIX-35 的既有口径：首次写入带时间戳），但**它在标记区块内、比较时会被中性化**
+    // ⇒ 只有别的内容真变了才重写（FIX-35 的幂等断言守着）✓
     `> 最后更新：${nowIso}`,
     '',
     ...(rows.length ? rows : ['- （暂无）']),
@@ -1631,6 +1663,119 @@ export async function buildWritePlan({ project, store, config, nowIso = new Date
 }
 
 /**
+ * **正文标题行里的 `^` 前缀去掉**喵（FIX-110 ④，用户裁定 A2）喵。
+ *
+ * 真机残留：39 篇的**标题行**以 `^` 开头（`## ^T16 …`），那是"归档前缀"被写进正文的历史遗留 ——
+ * 归档语义早已由头部 `archived: true` 承载（FIX-69/77），正文里的 `^` 只是噪音喵。
+ *
+ * 三条纪律喵：① **只动标题行开头的 `^`**（`^#{1,6}\s*\^`），该行其余与正文其它内容**一字不动**；
+ * ② **头部不动**（归档语义在 `archived: true`）；③ 可预演 + **幂等**（清完再跑 0 处）喵。
+ *
+ * @returns `{ dryRun, files: [{ path, line, before, after }], fixed, failed }`喵。
+ */
+export async function stripBodyCaretTitles({ project, store = null, dryRun = true, stampIso = new Date().toISOString() } = {}) {
+  const files = []
+  const failed = []
+  let fixed = 0
+  for (const entry of await scanAllDocs({ project, store })) {
+    const info = analyzeFrontMatter(entry.text)
+    const body = info.hasHeader ? info.body : entry.text
+    const lines = body.split('\n')
+    let touched = false
+    const planned = []
+    for (let i = 0; i < lines.length; i += 1) {
+      const hit = /^(#{1,6}\s*)\^(\s*)(\S.*)$/.exec(lines[i])
+      if (!hit) continue
+      touched = true
+      planned.push({ line: i + 1, before: lines[i], after: `${hit[1]}${hit[3]}` })
+      lines[i] = `${hit[1]}${hit[3]}`
+    }
+    if (!touched) continue
+    files.push({ path: entry.path, line: planned[0].line, before: planned[0].before, after: planned[0].after, count: planned.length })
+    if (dryRun) continue
+    const next = info.hasHeader ? `${info.rawHeader}${lines.join('\n')}` : lines.join('\n')
+    const written = await writeWithBackup({ project, path: entry.path, text: next, stampIso })
+    if (!written.ok) {
+      failed.push({ path: entry.path, error: written.error })
+      continue
+    }
+    fixed += 1
+    const record = store && typeof store.getDoc === 'function' ? store.getDoc(entry.path) : null
+    if (record) await store.putDoc(docRecord({ ...record, chars: countChars(next), updatedAt: stampIso }))
+  }
+  return { dryRun, files, fixed, failed }
+}
+
+/**
+ * **清掉"全 null 头"**喵（FIX-105 ⑦⑧）喵 —— 真机污染的一次性清理动作喵。
+ *
+ * 背景：读改写路径曾经无条件渲染 front-matter ⇒ 全库积了 **126+ 个**「内容键全 null、只剩两行留痕」的头
+ * （任务卡 23 张 + `仓库/docs` 下 126 个），同族不一致、还被台账当正式文档档检查 ⇒ 反复报莫名告警 ✗。
+ * 写侧已修（`composeRewrittenFile`），这里负责**把积下来的清掉**：**只删那段头，正文一字不动**；
+ * legacy 老档清掉后回到"无头"，按 legacy 豁免口径处理；留痕仍在台账/回执里（不必写在文件里）喵。
+ *
+ * 幂等：清完再跑就找不到"全 null 头"了（不产生新写入）✓；dryRun 给"将清 N 处"的预演 ✓。
+ *
+ * @returns `{ dryRun, files: [{ path, headerLines, preview }], stripped, pending, failed }`喵。
+ */
+export async function stripNullFrontMatter({ project, store = null, dryRun = true, stampIso = new Date().toISOString() } = {}) {
+  const files = []
+  const pending = []
+  const failed = []
+  // FIX-112 ②："含非占位键 ⇒ 跳过"也要计数（让人一眼看出没伤到有信息的头，尤其归档字段）喵
+  const skipped = []
+  let stripped = 0
+  // FIX-106 补漏：**归档目录也要清** —— `scanAllDocs` 只扫 docsDirs/任务/产出根，
+  // 而真机副本里有 3 处全 null 头落在 `archive/<分片>/` 下（那一类不在 docsDirs 里）✗ 喵
+  const entries = [...(await scanAllDocs({ project, store }))]
+  const seenPaths = new Set(entries.map((entry) => entry.path))
+  const archiveDir = project && project.archiveDir ? String(project.archiveDir) : null
+  if (archiveDir) {
+    for (const name of await listMarkdownDeep(archiveDir)) {
+      const path = joinUnderRoot(archiveDir, name)
+      // **去重**：归档目录若已在 `docsDirs` 里，`scanAllDocs` 已经收过它 ⇒ 别收两遍（否则"跳过 N 处"会翻倍）喵
+      if (seenPaths.has(path)) continue
+      const file = await readFileIfPresent(path)
+      if (file) {
+        seenPaths.add(path)
+        entries.push({ path, text: file.text, meta: parseFrontMatter(file.text).meta, body: parseFrontMatter(file.text).body })
+      }
+    }
+  }
+  for (const entry of entries) {
+    const info = analyzeFrontMatter(entry.text)
+    // FIX-112：**白名单判据** —— 只有"6 个占位键全空 + 留痕键"才可清；
+    // 出现任何别的键（`archived`/`archivedAt`/`archivePending`/`nextTier`/…）一律跳过（清它 = 数据损失）✗ 喵
+    if (!info.hasHeader) continue
+    if (!info.strippable) {
+      if (info.allContentNull && info.nonPlaceholderKeys.length) {
+        // 预演里要能看出"跳过了哪些有信息的头"（req ②：一眼确认没伤到归档字段）喵
+        skipped.push({ path: entry.path, keys: info.nonPlaceholderKeys })
+      }
+      continue
+    }
+    const headerLines = info.rawHeader.split('\n').filter((line) => line.trim()).length
+    files.push({
+      path: entry.path,
+      headerLines,
+      // 摘要（给动作清单用）：头里那几行原文
+      preview: info.rawHeader.split('\n').slice(0, 4).join(' / '),
+    })
+    if (dryRun) continue
+    const next = info.body.replace(/^\n+/, '')
+    const written = await writeWithBackup({ project, path: entry.path, text: next, stampIso })
+    if (!written.ok) {
+      failed.push({ path: entry.path, error: written.error })
+      continue
+    }
+    stripped += 1
+    const record = store && typeof store.getDoc === 'function' ? store.getDoc(entry.path) : null
+    if (record) await store.putDoc(docRecord({ ...record, chars: countChars(next), updatedAt: stampIso }))
+  }
+  return { dryRun, files, stripped, pending, failed, skipped }
+}
+
+/**
  * 馆员一轮治理喵（M4 交付物 2 的批次入口）喵。
  *
  * 顺序有讲究：**先去重 → 再命名规范化 → 再 tags 复核 → 重新审计 → 归档 → 最后写索引**喵。
@@ -1657,7 +1802,12 @@ export async function librarianSweep({ project, store, config, dryRun = false, s
     const refRepairDry = await repairDanglingRefs({ project, store, dryRun: true, stampIso })
     const archiveMarkDry = await markArchivePending({ project, store, dryRun: true })
     const caretFixDry = await correctCaretClaim({ project, store, dryRun: true })
-    const dryActions = collectActions({ relocate: relocateDry, refRepair: refRepairDry, archiveMark: archiveMarkDry, caretFix: caretFixDry, plan: { overwrite: plan.overwrite, create: plan.create, rename: plan.rename }, naming, dryRun: true })
+    // FIX-105 ⑦⑧ / FIX-106 ①：这两步也要在**预演**里出现（"将清 N 处全 null 头" / "将重建哪几类索引"）喵
+    const stripNullDry = await stripNullFrontMatter({ project, store, dryRun: true, stampIso })
+    // FIX-110 ④：正文标题 ^ 的存量清理也在预演里出现（与清 null 头同属存量清理）喵
+    const bodyCaretDry = await stripBodyCaretTitles({ project, store, dryRun: true, stampIso })
+    const indexesDry = await writeKindIndexes({ project, census: await documentCensus({ project }), dryRun: true, now: stampIso })
+    const dryActions = collectActions({ relocate: relocateDry, refRepair: refRepairDry, archiveMark: archiveMarkDry, caretFix: caretFixDry, stripNull: stripNullDry, bodyCaret: bodyCaretDry, indexes: indexesDry, plan: { overwrite: plan.overwrite, create: plan.create, rename: plan.rename }, naming, dryRun: true })
     return {
       todos: buildTodoList({ report: audit }),
       auditLevel: audit.level,
@@ -1684,6 +1834,9 @@ export async function librarianSweep({ project, store, config, dryRun = false, s
       refRepair: refRepairDry,
       archiveMark: archiveMarkDry,
       caretFix: caretFixDry,
+      stripNull: stripNullDry,
+      bodyCaret: bodyCaretDry,
+      indexes: indexesDry,
       // FIX-66 ⑤：dryRun 也给**同一份报告的预演版**（"将移动 X / 将改名 Y / 将更新引用 Z"）喵
       verification: {
         dryRun: true,
@@ -1726,6 +1879,18 @@ export async function librarianSweep({ project, store, config, dryRun = false, s
   // FIX-77 ②：legacy 档补「待归档」标注（只动 front-matter）；③：订正对 `^` 的错误表述（**有意变更**）喵
   const archiveMark = await markArchivePending({ project, store, dryRun: false, stampIso })
   const caretFix = await correctCaretClaim({ project, store, dryRun: false, stampIso })
+  /**
+   * FIX-105 ⑦：**清掉历史积下来的"全 null 头"**（写侧已在 `composeRewrittenFile` 修好，这里清存量）喵 ——
+   * 放在搬移/引用修复**之后**（否则刚清完又被改写路径碰一遍，白清）喵。
+   */
+  const stripNull = await stripNullFrontMatter({ project, store, dryRun: false, stampIso })
+  // FIX-110 ④：顺带把**正文标题行**的历史  清掉（只动那个前缀，可预演 + 幂等）喵
+  const bodyCaret = await stripBodyCaretTitles({ project, store, dryRun: false, stampIso })
+  /**
+   * FIX-106 ①②④：**收尾重建八类索引**（与 `librarian_indexes` **同一实现** `writeKindIndexes`）；
+   * 放在"搬移 / 改名 / 引用修复"**之后** —— 否则索引会指向旧路径 ✗；幂等由实现保证（内容没变不写）喵。
+   */
+  const indexes = await writeKindIndexes({ project, census: await documentCensus({ project }), dryRun: false, now: stampIso })
 
   // FIX-66：**验收报告**（插件自己把"改了什么/正文有没有动/引用干不干净/审计好转没有"算出来）喵
   const movedOldPaths = [
@@ -1757,6 +1922,9 @@ export async function librarianSweep({ project, store, config, dryRun = false, s
     refRepair,
     archiveMark,
     caretFix,
+    stripNull,
+    bodyCaret,
+    indexes,
     // FIX-77 ③：`^` 表述订正是**用户授权的有意正文变更** —— 从"正文零改动"名单里单列出来喵
     intendedChanges: (caretFix && caretFix.fixed) || [],
     verification,

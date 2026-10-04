@@ -22,6 +22,10 @@ import { modelSourceText, resolveEffectiveModel } from './effective-model.js'
 import { globalSharedFilesText } from '../librarian/globals.js'
 // FIX-104：续派只发任务切片 —— 变化段用规范段（与契约/体检同源）喵
 import { docSpecLines, resolvedPathsLines } from '../ledger/docarea.js'
+// FIX-108/109：审计摘要与待推送池（与 audit_scan / 面板**同一份实现**）喵
+import { renderAuditDigest, routeOfItem } from '../audit/digest.js'
+import { loadPushState } from '../audit/push.js'
+import { runPanelAudit } from '../panel/refresh.js'
 // FIX-99：判'既有常驻实例的 owner 会话是否已归档'（FIX-90 的归一化归档集合）+ 拿 owner 会话的宿主来源喵
 import { archivedSessionsOf, isArchivedSession, normalizeArchivedSet, parentSessionOf, sessionParentIndexOf } from '../audit/archived.js'
 
@@ -272,6 +276,17 @@ export function delegationFailure(error, role = null) {
 }
 
 /**
+ * 角色 id → **审计路由键**喵（FIX-108/109）喵 —— 与 `AUDIT_ROUTES` 的取值对齐（`librarian` / `implementer` / `human`）喵。
+ * 目的：契约里的审计摘要与待推送池都按这个键筛"归你这一路的条目"喵。
+ */
+export function routeForRole(roleId) {
+  const id = String(roleId || '')
+  if (id === 'librarian') return 'librarian'
+  if (['implementer', 'researcher', 'reviewer'].includes(id)) return 'implementer'
+  return 'human'
+}
+
+/**
  * 取"这个名字下**还在用**的那条成员记录"喵（FIX-99 ②）喵。
  *
  * 为什么不能直接 `getMember(name)`：成员文档按 **id** 存（FIX-17），而退役记录与在用记录**同名**
@@ -468,6 +483,30 @@ export function registerChannels(ctx, config, ledger, collected, projectFor) {
         // FIX-99 ④ / FIX-101 ②：**全局共享文件**清单 —— 进契约（迁移/索引类任务要知道"哪些文件是全局一份"），
         // 常驻派单的回执里也再带一次（便于主代理串行）喵
         const globalFilesText = resolved ? globalSharedFilesText(resolved.project) : ''
+        /**
+         * FIX-108 ③：**契约自动带审计摘要**（闭环：馆员看得见要收拾什么）喵 ——
+         * 用**同一份实现**（`runPanelAudit` → `renderAuditDigest`）产出，馆员看全量、其它角色只看与本任务相关的喵；
+         * FIX-109 ④：把**待推送池**里属于该角色的条目一并带上（没有活跃角色时新增条目不会丢）喵。
+         */
+        let auditDigest = null
+        try {
+          if (resolved) {
+            const { report } = await runPanelAudit({
+              ctx, config, store: resolved.store, project: resolved.project,
+            })
+            const pushState = await loadPushState({ project: resolved.project })
+            const minePending = (pushState.pending || []).filter((row) => row.role === routeForRole(role.id))
+            auditDigest = renderAuditDigest({
+              report,
+              taskId: role.singleton === true ? null : taskId,
+              role: routeForRole(role.id),
+              pending: minePending,
+            })
+          }
+        } catch (error) {
+          // 摘要拿不到**不影响派单**（契约少一段而已）—— 但要留一句，别静默喵
+          warnings.push(`审计摘要没拿到（不影响派单）：${(error && error.message) || error}`)
+        }
         // FIX-61：结构缺失就在派单回执里也提示一句（主代理不必"记得"去调 project_init）喵
         const structureHint = resolved ? missingStructure({ project: resolved.project }) : null
         // FIX-62：会动文件的角色在派单回执里给一句 git 基线提示（**只提示、不代提交**；非仓库/干净则没有）喵
@@ -486,6 +525,8 @@ export function registerChannels(ctx, config, ledger, collected, projectFor) {
           totalAgents,
           // FIX-101 ②③：全局共享文件清单进契约（与回执同一份文本）喵
           globalFilesText,
+          // FIX-108 ③：审计摘要（馆员全量 / 其它角色按任务过滤）喵
+          auditDigest,
         })
         warnings.push(...contract.warnings)
 

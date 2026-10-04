@@ -25,7 +25,9 @@ export function globalSharedFiles(project) {
   if (project.archiveDir) rows.push({ key: '归档目录', path: project.archiveDir, why: '归档分片目录（移动/改名）' })
   // 派生态面板快照也全局一份（派生写，谁写谁覆盖）喵
   rows.push({ key: '面板快照', path: joinUnderRoot(project.root, '.agent-contract/panel.json'), why: '面板派生快照（可重建）' })
-  return rows.filter((row) => row.path)
+  // **坑库索引没配「坑」类别时 path 为 null** —— 条目仍然列出来（它是个"概念上存在"的全局文件），
+  // 只是标一句"本仓库没配该类 ⇒ 不写"（否则清单会莫名少一项，读者以为漏了）喵
+  return rows.map((row) => ({ ...row, path: row.path || null }))
 }
 
 /** 一行话（契约 / 回执里用）喵：把全局文件与"写前先查占用"的规矩一起说清喵。 */
@@ -33,5 +35,5 @@ export function globalSharedFilesText(project) {
   const rows = globalSharedFiles(project)
   if (!rows.length) return ''
   return '全局共享文件（**跨会话同时写会互相覆盖**，写前先查占用、必要时排队）：'
-    + rows.map((row) => `${row.key} \`${row.path}\``).join('；')
+    + rows.map((row) => (row.path ? `${row.key} \`${row.path}\`` : `${row.key}（本仓库未配该类目录 ⇒ 不写）`)).join('；')
 }
